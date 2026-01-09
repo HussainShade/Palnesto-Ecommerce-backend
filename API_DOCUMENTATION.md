@@ -162,6 +162,7 @@ None required
 | `maxPrice` | number | No | Maximum final price | `?maxPrice=5000` |
 | `page` | number | No | Page number (default: 1) | `?page=1` |
 | `limit` | number | No | Items per page (default: 10, max: 100) | `?limit=20` |
+| `groupBy` | string | No | Group shirts by design (name+type+price). Values: `"design"` | `?groupBy=design` |
 
 **Example Requests:**
 
@@ -185,7 +186,19 @@ GET /api/shirts?minPrice=1000&maxPrice=3000&page=1&limit=20
 GET /api/shirts?size=M&type=Casual&minPrice=1500&maxPrice=2500&page=1&limit=10
 ```
 
+*Get grouped designs (one record per design with all size variants):*
+```
+GET /api/shirts?groupBy=design&page=1&limit=12
+```
+
+*Get grouped designs with filters:*
+```
+GET /api/shirts?groupBy=design&type=Casual&minPrice=1000&maxPrice=3000&page=1&limit=12
+```
+
 **Success Response (200 OK):**
+
+*Standard response (individual variants):*
 ```json
 {
   "success": true,
@@ -216,6 +229,80 @@ GET /api/shirts?size=M&type=Casual&minPrice=1500&maxPrice=2500&page=1&limit=10
   }
 }
 ```
+
+*Grouped response (with `groupBy=design`):*
+```json
+{
+  "success": true,
+  "data": {
+    "shirts": [
+      {
+        "_id": "65a1b2c3d4e5f6g7h8i9j0k2",
+        "sellerId": "65a1b2c3d4e5f6g7h8i9j0k1",
+        "name": "Premium Cotton Shirt",
+        "description": "High-quality cotton fabric for comfort",
+        "type": "Casual",
+        "price": 2000,
+        "discount": {
+          "type": "percentage",
+          "value": 15
+        },
+        "finalPrice": 1700,
+        "totalStock": 75,
+        "availableSizes": ["M", "L", "XL"],
+        "variants": [
+          {
+            "_id": "65a1b2c3d4e5f6g7h8i9j0k2",
+            "size": "M",
+            "stock": 30,
+            "finalPrice": 1700
+          },
+          {
+            "_id": "65a1b2c3d4e5f6g7h8i9j0k3",
+            "size": "L",
+            "stock": 25,
+            "finalPrice": 1700
+          },
+          {
+            "_id": "65a1b2c3d4e5f6g7h8i9j0k4",
+            "size": "XL",
+            "stock": 20,
+            "finalPrice": 1700
+          }
+        ]
+      }
+    ],
+    "total": 25,
+    "page": 1,
+    "limit": 12,
+    "totalPages": 3
+  }
+}
+```
+
+**Response Format Details:**
+
+**Standard Response (without `groupBy`):**
+- Returns individual shirt variants (one record per size)
+- Each record has `size` and `stock` fields
+- Pagination is based on individual variants
+
+**Grouped Response (with `groupBy=design`):**
+- Returns one record per unique design (grouped by name + type + price)
+- Each record includes:
+  - Shared fields: `name`, `description`, `type`, `price`, `discount`, `finalPrice`
+  - `totalStock`: Sum of all variant stocks
+  - `availableSizes`: Array of sizes with stock > 0
+  - `variants`: Array of all size variants for this design
+- Pagination is based on unique designs (not individual variants)
+- `_id` is the first variant's ID (useful for navigation)
+
+**Notes:**
+- When `groupBy=design`, the `size` filter works at the design level (design must have at least one variant matching the size)
+- All variants in a design share the same `name`, `type`, and `price`
+- Variants are sorted by size order (M, L, XL, XXL)
+- `availableSizes` only includes sizes with stock > 0
+- Grouped results are not cached (too complex to invalidate)
 
 **Error Response (400 Bad Request):**
 ```json
@@ -438,11 +525,231 @@ Cookie: auth_token=<jwt_token> (automatically sent by Postman after login)
 
 ---
 
+### 7. Batch Create Shirts (Protected)
+
+**POST** `/api/shirts/batch`
+
+Create multiple shirts with different sizes and stocks in a single operation. All shirts share the same name, description, type, price, and discount. Each shirt has a different size and stock. Requires authentication.
+
+**Headers:**
+```
+Content-Type: application/json
+Cookie: auth_token=<jwt_token> (automatically sent by Postman after login)
+```
+
+**Request Body:**
+```json
+{
+  "name": "Premium Cotton Shirt",
+  "description": "High-quality cotton fabric for comfort",
+  "type": "Casual",
+  "price": 2000,
+  "discount": {
+    "type": "percentage",
+    "value": 15
+  },
+  "sizes": [
+    { "size": "M", "stock": 30 },
+    { "size": "L", "stock": 25 },
+    { "size": "XL", "stock": 20 }
+  ]
+}
+```
+
+**Field Details:**
+| Field | Type | Required | Description | Constraints |
+|-------|------|----------|-------------|-------------|
+| `name` | string | Yes | Shirt name | 1-200 characters |
+| `description` | string | No | Shirt description | Max 1000 characters |
+| `type` | string | Yes | Shirt type | Casual, Formal, Wedding, Sports, or Vintage |
+| `price` | number | Yes | Base price | 0-10000 |
+| `discount` | object | No | Discount details | See discount schema below |
+| `sizes` | array | Yes | Array of size/stock pairs | Min 1, no duplicates, at least one with stock > 0 |
+
+**Sizes Array:**
+- Each object must have `size` (M, L, XL, or XXL) and `stock` (integer, min 0)
+- No duplicate sizes allowed
+- At least one size must have stock > 0
+- Only sizes with stock > 0 will be created
+
+**Example Requests:**
+
+*With percentage discount:*
+```json
+{
+  "name": "Summer Casual Shirt",
+  "type": "Casual",
+  "price": 1800,
+  "discount": {
+    "type": "percentage",
+    "value": 20
+  },
+  "sizes": [
+    { "size": "M", "stock": 25 },
+    { "size": "L", "stock": 30 },
+    { "size": "XL", "stock": 15 }
+  ]
+}
+```
+
+*With amount discount:*
+```json
+{
+  "name": "Formal Business Shirt",
+  "description": "Professional attire",
+  "type": "Formal",
+  "price": 3000,
+  "discount": {
+    "type": "amount",
+    "value": 500
+  },
+  "sizes": [
+    { "size": "L", "stock": 40 },
+    { "size": "XL", "stock": 35 }
+  ]
+}
+```
+
+*Without discount:*
+```json
+{
+  "name": "Wedding Shirt",
+  "description": "Elegant shirt for special occasions",
+  "type": "Wedding",
+  "price": 4500,
+  "sizes": [
+    { "size": "M", "stock": 20 },
+    { "size": "L", "stock": 25 },
+    { "size": "XL", "stock": 20 },
+    { "size": "XXL", "stock": 15 }
+  ]
+}
+```
+
+**Success Response (201 Created):**
+```json
+{
+  "success": true,
+  "message": "Successfully created 3 shirt(s)",
+  "data": {
+    "shirts": [
+      {
+        "_id": "65a1b2c3d4e5f6g7h8i9j0k3",
+        "sellerId": "65a1b2c3d4e5f6g7h8i9j0k1",
+        "name": "Premium Cotton Shirt",
+        "description": "High-quality cotton fabric for comfort",
+        "size": "M",
+        "type": "Casual",
+        "price": 2000,
+        "discount": {
+          "type": "percentage",
+          "value": 15
+        },
+        "finalPrice": 1700,
+        "stock": 30,
+        "createdAt": "2024-01-15T10:30:00.000Z",
+        "updatedAt": "2024-01-15T10:30:00.000Z"
+      },
+      {
+        "_id": "65a1b2c3d4e5f6g7h8i9j0k4",
+        "sellerId": "65a1b2c3d4e5f6g7h8i9j0k1",
+        "name": "Premium Cotton Shirt",
+        "description": "High-quality cotton fabric for comfort",
+        "size": "L",
+        "type": "Casual",
+        "price": 2000,
+        "discount": {
+          "type": "percentage",
+          "value": 15
+        },
+        "finalPrice": 1700,
+        "stock": 25,
+        "createdAt": "2024-01-15T10:30:00.000Z",
+        "updatedAt": "2024-01-15T10:30:00.000Z"
+      },
+      {
+        "_id": "65a1b2c3d4e5f6g7h8i9j0k5",
+        "sellerId": "65a1b2c3d4e5f6g7h8i9j0k1",
+        "name": "Premium Cotton Shirt",
+        "description": "High-quality cotton fabric for comfort",
+        "size": "XL",
+        "type": "Casual",
+        "price": 2000,
+        "discount": {
+          "type": "percentage",
+          "value": 15
+        },
+        "finalPrice": 1700,
+        "stock": 20,
+        "createdAt": "2024-01-15T10:30:00.000Z",
+        "updatedAt": "2024-01-15T10:30:00.000Z"
+      }
+    ]
+  }
+}
+```
+
+**Error Responses:**
+
+*Unauthorized (401):*
+```json
+{
+  "success": false,
+  "message": "Authentication required"
+}
+```
+
+*Validation error (400):*
+```json
+{
+  "success": false,
+  "message": "Validation error",
+  "errors": [
+    {
+      "code": "custom",
+      "path": ["sizes"],
+      "message": "Duplicate sizes are not allowed"
+    }
+  ]
+}
+```
+
+*Validation error - no stock (400):*
+```json
+{
+  "success": false,
+  "message": "Validation error",
+  "errors": [
+    {
+      "code": "custom",
+      "path": ["sizes"],
+      "message": "At least one size must have stock greater than 0"
+    }
+  ]
+}
+```
+
+**Notes:**
+- Only sizes with `stock > 0` are created (sizes with stock = 0 are filtered out)
+- All created shirts share the same `name`, `description`, `type`, `price`, and `discount`
+- Each shirt has a unique `size` and `stock` value
+- `finalPrice` is calculated automatically based on `price` and `discount`
+- Cache is invalidated after batch creation
+
+---
+
 ### 7. Update Shirt (Protected)
 
 **PUT** `/api/shirts/:id`
 
-Update an existing shirt. Only the seller who created the shirt can update it.
+Update an existing shirt and optionally update/create size variants. Only the seller who created the shirt can update it.
+
+**Key Features:**
+- Updates the main shirt with provided fields
+- If `sizes` array is provided:
+  - **Updates existing variants** (same seller, same name, same size) with new stock and shared attributes
+  - **Creates new variants** for sizes that don't exist
+  - **Skips the current shirt's size** (already updated via main update)
 
 **Headers:**
 ```
@@ -458,12 +765,49 @@ Cookie: auth_token=<jwt_token> (automatically sent by Postman after login)
 **Request Body:**
 All fields are optional (partial update). Only include fields you want to update.
 
+**Standard Update:**
 ```json
 {
   "price": 2500,
   "stock": 35
 }
 ```
+
+**Update with New Size Variants:**
+```json
+{
+  "name": "Updated Shirt Name",
+  "price": 2500,
+  "stock": 35,
+  "discount": {
+    "type": "percentage",
+    "value": 20
+  },
+  "sizes": [
+    { "size": "L", "stock": 30 },
+    { "size": "XL", "stock": 25 }
+  ]
+}
+```
+
+**Field Details:**
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | No | Shirt name |
+| `description` | string | No | Shirt description |
+| `type` | string | No | Shirt type |
+| `price` | number | No | Base price |
+| `discount` | object | No | Discount details |
+| `stock` | number | No | Stock quantity for current shirt |
+| `sizes` | array | No | Array of size/stock pairs to update existing or create new variants |
+
+**Sizes Array (Optional):**
+- If provided, updates existing variants or creates new shirt records for additional sizes
+- Each object must have `size` (M, L, XL, or XXL) and `stock` (integer, min 0)
+- No duplicate sizes allowed in the array
+- Only sizes with stock > 0 are created
+- Skips sizes that already exist (same seller, same name, same size)
+- Skips the current shirt's size (it's being updated, not created)
 
 **Example Requests:**
 
@@ -504,7 +848,31 @@ All fields are optional (partial update). Only include fields you want to update
 }
 ```
 
+*Update with new size variants:*
+```json
+{
+  "name": "Premium Cotton Shirt",
+  "price": 2000,
+  "discount": {
+    "type": "percentage",
+    "value": 15
+  },
+  "sizes": [
+    { "size": "L", "stock": 30 },
+    { "size": "XL", "stock": 25 },
+    { "size": "XXL", "stock": 20 }
+  ]
+}
+```
+
+**Note:** 
+- If the current shirt is size "M", and you include `{ "size": "M", "stock": 10 }` in the sizes array, it will be skipped (the current shirt is being updated via main update, not through sizes array)
+- **Existing variants** (same seller, same name, different size) will be **updated** with new stock and shared attributes (name, description, type, price, discount), not skipped
+- **New variants** (sizes that don't exist) will be **created** with the provided stock and shared attributes
+
 **Success Response (200 OK):**
+
+*Without sizes array (standard update):*
 ```json
 {
   "success": true,
@@ -525,7 +893,91 @@ All fields are optional (partial update). Only include fields you want to update
       "stock": 50,
       "createdAt": "2024-01-15T10:30:00.000Z",
       "updatedAt": "2024-01-15T10:35:00.000Z"
-    }
+    },
+    "updatedShirts": [],
+    "createdShirts": [],
+    "updatedCount": 0,
+    "createdCount": 0
+  }
+}
+```
+
+*With sizes array (update + update/create variants):*
+```json
+{
+  "success": true,
+  "message": "Shirt updated successfully. 2 variant(s) updated, 1 variant(s) created.",
+  "data": {
+    "shirt": {
+      "_id": "65a1b2c3d4e5f6g7h8i9j0k2",
+      "sellerId": "65a1b2c3d4e5f6g7h8i9j0k1",
+      "name": "Premium Cotton Shirt",
+      "size": "M",
+      "type": "Casual",
+      "price": 2000,
+      "discount": {
+        "type": "percentage",
+        "value": 15
+      },
+      "finalPrice": 1700,
+      "stock": 35,
+      "createdAt": "2024-01-15T10:30:00.000Z",
+      "updatedAt": "2024-01-15T10:35:00.000Z"
+    },
+    "updatedShirts": [
+      {
+        "_id": "65a1b2c3d4e5f6g7h8i9j0k6",
+        "sellerId": "65a1b2c3d4e5f6g7h8i9j0k1",
+        "name": "Premium Cotton Shirt",
+        "size": "L",
+        "type": "Casual",
+        "price": 2000,
+        "discount": {
+          "type": "percentage",
+          "value": 15
+        },
+        "finalPrice": 1700,
+        "stock": 30,
+        "createdAt": "2024-01-15T09:00:00.000Z",
+        "updatedAt": "2024-01-15T10:35:00.000Z"
+      },
+      {
+        "_id": "65a1b2c3d4e5f6g7h8i9j0k7",
+        "sellerId": "65a1b2c3d4e5f6g7h8i9j0k1",
+        "name": "Premium Cotton Shirt",
+        "size": "XL",
+        "type": "Casual",
+        "price": 2000,
+        "discount": {
+          "type": "percentage",
+          "value": 15
+        },
+        "finalPrice": 1700,
+        "stock": 25,
+        "createdAt": "2024-01-15T09:00:00.000Z",
+        "updatedAt": "2024-01-15T10:35:00.000Z"
+      }
+    ],
+    "createdShirts": [
+      {
+        "_id": "65a1b2c3d4e5f6g7h8i9j0k8",
+        "sellerId": "65a1b2c3d4e5f6g7h8i9j0k1",
+        "name": "Premium Cotton Shirt",
+        "size": "XXL",
+        "type": "Casual",
+        "price": 2000,
+        "discount": {
+          "type": "percentage",
+          "value": 15
+        },
+        "finalPrice": 1700,
+        "stock": 20,
+        "createdAt": "2024-01-15T10:35:00.000Z",
+        "updatedAt": "2024-01-15T10:35:00.000Z"
+      }
+    ],
+    "updatedCount": 2,
+    "createdCount": 1
   }
 }
 ```
@@ -553,13 +1005,31 @@ All fields are optional (partial update). Only include fields you want to update
 {
   "success": false,
   "message": "Validation error",
-  "errors": [...]
+  "errors": [
+    {
+      "code": "custom",
+      "path": ["sizes"],
+      "message": "Duplicate sizes are not allowed"
+    }
+  ]
 }
 ```
 
+**Notes:**
+- **Backward Compatible**: If `sizes` array is not provided, endpoint works as before (standard update)
+- **Update Existing Variants**: If a variant exists (same seller, same name, same size), it's updated with:
+  - New stock value
+  - Updated shared attributes (name, description, type, price, discount, finalPrice)
+- **Create New Variants**: If a variant doesn't exist, a new shirt record is created
+- **Current Size Skipped**: The current shirt's size is automatically skipped in the sizes array (it's updated via main update)
+- **Stock Filtering**: Only sizes with stock > 0 are processed (sizes with stock = 0 are filtered out)
+- **Shared Attributes**: All variants (updated and created) inherit name, description, type, price, and discount from the updated shirt
+- **Operation Order**: Main shirt update happens first, then variants are updated/created
+- **Security**: Only variants belonging to the same seller and having the same name are updated (prevents unauthorized updates)
+
 ---
 
-### 8. Delete Shirt (Protected)
+### 9. Delete Shirt (Protected)
 
 **DELETE** `/api/shirts/:id`
 

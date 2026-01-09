@@ -1,0 +1,88 @@
+import 'dotenv/config';
+import { serve } from '@hono/node-server';
+import { Hono } from 'hono';
+import { cors } from 'hono/cors';
+import { getCookie, setCookie } from 'hono/cookie';
+import { connectDatabase, disconnectDatabase } from './config/database.js';
+import { closeRedisClient } from './config/redis.js';
+import { initializeQueue, closeQueue } from './config/queue.js';
+import authRoutes from './routes/auth.routes.js';
+import shirtRoutes from './routes/shirt.routes.js';
+import { errorHandler, notFoundHandler } from './middlewares/error.middleware.js';
+/**
+ * Main application bootstrap
+ * Initializes all services and sets up routes
+ */
+const app = new Hono();
+// CORS Configuration
+// Allows requests from Next.js frontend with credentials support for HTTP-only cookies
+const frontendUrl = process.env.FRONTEND_URL || process.env.CORS_ORIGIN || 'http://localhost:3000';
+app.use('*', cors({
+    origin: frontendUrl, // Allow requests from Next.js frontend
+    credentials: true, // CRITICAL: Required for HTTP-only cookies (Access-Control-Allow-Credentials: true)
+    allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'], // Allowed HTTP methods
+    allowHeaders: ['Content-Type', 'Authorization'], // Allowed request headers
+    exposeHeaders: ['Content-Type'], // Headers that can be accessed by the frontend
+    maxAge: 86400, // Cache preflight requests for 24 hours
+}));
+// Cookie middleware is handled via getCookie/setCookie helpers
+// Health check endpoint
+app.get('/health', (c) => {
+    return c.json({
+        success: true,
+        message: 'Server is running',
+        timestamp: new Date().toISOString(),
+    });
+});
+// API routes
+app.route('/api/auth', authRoutes);
+app.route('/api/shirts', shirtRoutes);
+// Error handling
+app.onError(errorHandler);
+app.notFound(notFoundHandler);
+/**
+ * Graceful shutdown handler
+ * Closes all connections properly
+ */
+const gracefulShutdown = async () => {
+    console.log('\n🛑 Shutting down gracefully...');
+    try {
+        await disconnectDatabase();
+        await closeRedisClient();
+        await closeQueue();
+        process.exit(0);
+    }
+    catch (error) {
+        console.error('Error during shutdown:', error);
+        process.exit(1);
+    }
+};
+process.on('SIGTERM', gracefulShutdown);
+process.on('SIGINT', gracefulShutdown);
+/**
+ * Start server
+ * Initializes database, Redis, and queue before listening
+ */
+const startServer = async () => {
+    try {
+        // Initialize services
+        await connectDatabase();
+        // Initialize queue (non-blocking - server works without it)
+        await initializeQueue().catch((error) => {
+            console.warn('⚠️  Queue initialization failed, continuing without queue');
+        });
+        const port = parseInt(process.env.PORT || '5000', 10);
+        serve({
+            fetch: app.fetch,
+            port,
+        }, (info) => {
+            console.log(`🚀 Server is running on http://localhost:${info.port}`);
+            console.log(`📝 Environment: ${process.env.NODE_ENV || 'development'}`);
+        });
+    }
+    catch (error) {
+        console.error('❌ Failed to start server:', error);
+        process.exit(1);
+    }
+};
+startServer();
