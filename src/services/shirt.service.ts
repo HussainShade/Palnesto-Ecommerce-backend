@@ -1,14 +1,16 @@
-import { Shirt } from '../models/Shirt.js';
-import type { IShirt, ShirtSize, ShirtType, IDiscount } from '../models/Shirt.js';
+import { Shirt, ShirtSize, ShirtType, SizeReference } from '../models/index.js';
+import type { IShirt, IShirtSize, IDiscount } from '../models/index.js';
 import type { CreateShirtInput, UpdateShirtInput, ListShirtsInput, BatchCreateShirtInput } from '../validators/shirt.validator.js';
 import { getCachedShirtList, setCachedShirtList, invalidateShirtListCache } from './cache.service.js';
 import { getQueue } from '../config/queue.js';
+import { resolveSizeReference, resolveShirtType } from './reference-cache.service.js';
+import mongoose from 'mongoose';
 
 /**
  * Helper function to calculate finalPrice (same logic as pre-save hook)
- * Used to ensure finalPrice is set before validation
+ * Applies discount from Shirt to ShirtSize price
  */
-const calculateFinalPrice = (price: number, discount?: { type: 'amount' | 'percentage'; value: number }): number => {
+const calculateFinalPrice = (price: number, discount?: IDiscount): number => {
   let finalPrice = price;
 
   if (discount) {
@@ -23,23 +25,51 @@ const calculateFinalPrice = (price: number, discount?: { type: 'amount' | 'perce
 };
 
 /**
- * Creates a new shirt for a seller
+ * Creates a new shirt with a single size variant
+ * Creates Shirt first, then creates ShirtSize entry
  * Invalidates cache after creation
  */
 export const createShirt = async (
-  sellerId: string,
+  userId: string,
   data: CreateShirtInput
-): Promise<IShirt> => {
-  // Calculate finalPrice before creating document to pass validation
-  const finalPrice = calculateFinalPrice(data.price, data.discount);
+): Promise<{ shirt: IShirt; shirtSize: IShirtSize }> => {
+  // Validate that shirtTypeId exists
+  const shirtType = await ShirtType.findById(data.shirtTypeId);
+  if (!shirtType) {
+    throw new Error(`ShirtType with ID '${data.shirtTypeId}' not found. Please ensure reference data is seeded.`);
+  }
 
+  // Validate that sizeReferenceId exists
+  const sizeRef = await SizeReference.findById(data.sizeVariant.sizeReferenceId);
+  if (!sizeRef) {
+    throw new Error(`SizeReference with ID '${data.sizeVariant.sizeReferenceId}' not found. Please ensure reference data is seeded.`);
+  }
+
+  // Create Shirt first (without price, stock, size - those are in ShirtSize)
   const shirt = new Shirt({
-    ...data,
-    sellerId,
-    finalPrice, // Set finalPrice explicitly to pass validation
+    userId,
+    name: data.name,
+    description: data.description,
+    shirtTypeId: data.shirtTypeId,
+    discount: data.discount,
   });
 
   await shirt.save();
+
+  // Calculate finalPrice for this size variant
+  const finalPrice = calculateFinalPrice(data.sizeVariant.price, data.discount);
+
+  // Create ShirtSize entry for this size variant
+  const shirtSize = new ShirtSize({
+    shirtId: shirt._id,
+    sizeReferenceId: data.sizeVariant.sizeReferenceId,
+    price: data.sizeVariant.price,
+    imageURL: data.sizeVariant.imageURL,
+    stock: data.sizeVariant.stock || 0,
+    finalPrice, // Will be recalculated by pre-save hook, but set explicitly for validation
+  });
+
+  await shirtSize.save();
   
   // Invalidate cache after creating new shirt
   await invalidateShirtListCache();
@@ -49,7 +79,7 @@ export const createShirt = async (
     const queue = getQueue();
     if (queue) {
       await queue.add('log-event', {
-        message: `Shirt created: ${shirt.name} by seller ${sellerId}`,
+        message: `Shirt created: ${shirt.name} by user ${userId}`,
         timestamp: new Date().toISOString(),
       });
     }
@@ -58,39 +88,65 @@ export const createShirt = async (
     console.warn('Queue operation failed:', error);
   }
 
-  return shirt;
+  return { shirt, shirtSize };
 };
 
 /**
- * Creates multiple shirts in batch with different sizes and stocks
- * All shirts share the same name, description, type, price, and discount
- * Each shirt has a different size and stock
+ * Creates multiple size variants for a single shirt design
+ * Creates one Shirt, then creates multiple ShirtSize entries
  * Invalidates cache after creation
  */
 export const batchCreateShirts = async (
-  sellerId: string,
+  userId: string,
   data: BatchCreateShirtInput
-): Promise<IShirt[]> => {
-  // Calculate finalPrice once (same for all shirts)
-  const finalPrice = calculateFinalPrice(data.price, data.discount);
+): Promise<{ shirt: IShirt; shirtSizes: IShirtSize[] }> => {
+  // Validate that shirtTypeId exists
+  const shirtType = await ShirtType.findById(data.shirtTypeId);
+  if (!shirtType) {
+    throw new Error(`ShirtType with ID '${data.shirtTypeId}' not found. Please ensure reference data is seeded.`);
+  }
 
-  // Filter sizes with stock > 0 and create shirt documents
-  const shirtsToCreate = data.sizes
-    .filter((sizeStock) => sizeStock.stock > 0)
-    .map((sizeStock) => ({
-      sellerId,
-      name: data.name,
-      description: data.description,
-      size: sizeStock.size,
-      type: data.type,
-      price: data.price,
-      discount: data.discount,
-      finalPrice,
-      stock: sizeStock.stock,
-    }));
+  // Create Shirt first (common to all sizes)
+  const shirt = new Shirt({
+    userId,
+    name: data.name,
+    description: data.description,
+    shirtTypeId: data.shirtTypeId,
+    discount: data.discount,
+  });
 
-  // Create all shirts in batch
-  const createdShirts = await Shirt.insertMany(shirtsToCreate);
+  await shirt.save();
+
+  // Validate all SizeReferences exist
+  const sizeReferenceIds = data.sizes.map(s => s.sizeReferenceId);
+  const sizeRefs = await SizeReference.find({ _id: { $in: sizeReferenceIds } });
+  const sizeRefMap = new Map(sizeRefs.map(sr => [sr._id.toString(), sr._id]));
+
+  // Verify all size references were found
+  for (const sizeVariant of data.sizes) {
+    if (!sizeRefMap.has(sizeVariant.sizeReferenceId.toString())) {
+      throw new Error(`SizeReference with ID '${sizeVariant.sizeReferenceId}' not found. Please ensure reference data is seeded.`);
+    }
+  }
+
+  // Create ShirtSize entries for each size variant
+  const shirtSizesToCreate = data.sizes
+    .filter((sizeVariant) => sizeVariant.stock > 0)
+    .map((sizeVariant) => {
+      const finalPrice = calculateFinalPrice(sizeVariant.price, data.discount);
+
+      return {
+        shirtId: shirt._id,
+        sizeReferenceId: sizeVariant.sizeReferenceId,
+        price: sizeVariant.price,
+        imageURL: sizeVariant.imageURL,
+        stock: sizeVariant.stock,
+        finalPrice,
+      };
+    });
+
+  // Create all ShirtSize entries in batch
+  const createdShirtSizes = await ShirtSize.insertMany(shirtSizesToCreate);
 
   // Invalidate cache after batch creation
   await invalidateShirtListCache();
@@ -100,7 +156,7 @@ export const batchCreateShirts = async (
     const queue = getQueue();
     if (queue) {
       await queue.add('log-event', {
-        message: `Batch created ${createdShirts.length} shirts: ${data.name} by seller ${sellerId}`,
+        message: `Batch created ${createdShirtSizes.length} size variant(s) for shirt: ${data.name} by user ${userId}`,
         timestamp: new Date().toISOString(),
       });
     }
@@ -109,138 +165,133 @@ export const batchCreateShirts = async (
     console.warn('Queue operation failed:', error);
   }
 
-  return createdShirts as unknown as IShirt[];
+  return {
+    shirt,
+    shirtSizes: createdShirtSizes as unknown as IShirtSize[],
+  };
 };
 
 /**
  * Updates an existing shirt and optionally updates/creates size variants
- * Only allows seller to update their own shirts
+ * Only allows user to update their own shirts
  * Invalidates cache after update
- * Returns updated shirt, updated variants, and newly created variants
  */
 export const updateShirt = async (
   shirtId: string,
-  sellerId: string,
+  userId: string,
   data: UpdateShirtInput
 ): Promise<{
   shirt: IShirt;
-  updatedShirts: IShirt[];
-  createdShirts: IShirt[];
+  updatedShirtSizes: IShirtSize[];
+  createdShirtSizes: IShirtSize[];
   updatedCount: number;
   createdCount: number;
 } | null> => {
+  // Find shirt and verify ownership
   const shirt = await Shirt.findOne({
     _id: shirtId,
-    sellerId,
+    userId,
   });
 
   if (!shirt) {
     return null;
   }
 
-  // Extract sizes array if present (will be handled separately)
-  const { sizes, ...updateData } = data;
+  // Extract sizes array and currentSizeVariant if present (will be handled separately)
+  const { sizes, currentSizeVariant, ...updateData } = data;
 
-  // Calculate finalPrice if price or discount is being updated
-  let calculatedFinalPrice: number | undefined;
-  if (updateData.price !== undefined || updateData.discount !== undefined) {
-    const price = updateData.price !== undefined ? updateData.price : shirt.price;
-    const discount = updateData.discount !== undefined ? updateData.discount : shirt.discount;
-    calculatedFinalPrice = calculateFinalPrice(price, discount);
+  // Update the shirt (name, description, shirtTypeId, discount)
+  if (updateData.name !== undefined) shirt.name = updateData.name;
+  if (updateData.description !== undefined) shirt.description = updateData.description;
+  if (updateData.shirtTypeId) {
+    // Validate that shirtTypeId exists
+    const shirtType = await ShirtType.findById(updateData.shirtTypeId);
+    if (!shirtType) {
+      throw new Error(`ShirtType with ID '${updateData.shirtTypeId}' not found.`);
+    }
+    shirt.shirtTypeId = new mongoose.Types.ObjectId(updateData.shirtTypeId);
   }
+  if (updateData.discount !== undefined) shirt.discount = updateData.discount;
 
-  // Update the current shirt
-  Object.assign(shirt, updateData);
-  if (calculatedFinalPrice !== undefined) {
-    shirt.finalPrice = calculatedFinalPrice;
-  }
   await shirt.save();
 
-  const updatedShirts: IShirt[] = [];
-  const createdShirts: IShirt[] = [];
+  const updatedShirtSizes: IShirtSize[] = [];
+  const createdShirtSizes: IShirtSize[] = [];
   let updatedCount = 0;
   let createdCount = 0;
 
+  // Update the current shirt's size variant if provided
+  if (currentSizeVariant) {
+    const existingShirtSize = await ShirtSize.findOne({ shirtId: shirt._id });
+    if (existingShirtSize) {
+      if (currentSizeVariant.price !== undefined) existingShirtSize.price = currentSizeVariant.price;
+      if (currentSizeVariant.imageURL !== undefined) existingShirtSize.imageURL = currentSizeVariant.imageURL;
+      if (currentSizeVariant.stock !== undefined) existingShirtSize.stock = currentSizeVariant.stock;
+      // finalPrice will be recalculated by pre-save hook
+      await existingShirtSize.save();
+      updatedShirtSizes.push(existingShirtSize);
+      updatedCount++;
+    }
+  }
+
   // If sizes array is provided, update existing variants or create new ones
   if (sizes && sizes.length > 0) {
-    // Get the final values after update (use updated values or existing values)
-    const finalName = updateData.name !== undefined ? updateData.name : shirt.name;
-    const finalDescription = updateData.description !== undefined ? updateData.description : shirt.description;
-    const finalType = updateData.type !== undefined ? updateData.type : shirt.type;
-    const finalPrice = updateData.price !== undefined ? updateData.price : shirt.price;
-    const finalDiscount = updateData.discount !== undefined ? updateData.discount : shirt.discount;
-    const finalFinalPrice = calculatedFinalPrice !== undefined ? calculatedFinalPrice : shirt.finalPrice;
+    // Get existing ShirtSize entries for this shirt
+    const existingShirtSizes = await ShirtSize.find({ shirtId: shirt._id });
+    const existingSizeRefMap = new Map(
+      existingShirtSizes.map(ss => [ss.sizeReferenceId.toString(), ss])
+    );
 
-    // Filter out sizes that match the current shirt's size (it's already updated)
-    const sizesToProcess = sizes.filter((sizeStock) => sizeStock.size !== shirt.size && sizeStock.stock > 0);
+    // Get current shirt's sizeReferenceId to skip it (already updated via currentSizeVariant)
+    const currentSizeRefId = existingShirtSizes[0]?.sizeReferenceId?.toString();
 
-    if (sizesToProcess.length > 0) {
-      // Find existing variants with same name and size for this seller
-      const existingVariants = await Shirt.find({
-        sellerId,
-        name: finalName,
-        size: { $in: sizesToProcess.map((s) => s.size) },
-        _id: { $ne: shirtId }, // Exclude the current shirt
-      });
+    // Validate all SizeReferences exist
+    const sizeReferenceIds = sizes.map(s => s.sizeReferenceId);
+    const sizeRefs = await SizeReference.find({ _id: { $in: sizeReferenceIds } });
+    const sizeRefMap = new Map(sizeRefs.map(sr => [sr._id.toString(), sr._id]));
 
-      const existingVariantsMap = new Map(
-        existingVariants.map((v) => [v.size, v])
-      );
+    // Process each size variant in the request
+    for (const sizeVariant of sizes) {
+      if (sizeVariant.stock <= 0) continue; // Skip sizes with no stock
 
-      const sizesToUpdate: Array<{ size: ShirtSize; stock: number }> = [];
-      const sizesToCreate: Array<{ size: ShirtSize; stock: number }> = [];
-
-      // Separate sizes into update and create lists
-      for (const sizeStock of sizesToProcess) {
-        if (existingVariantsMap.has(sizeStock.size)) {
-          sizesToUpdate.push(sizeStock);
-        } else {
-          sizesToCreate.push(sizeStock);
-        }
+      // Skip the current shirt's size (it's updated via currentSizeVariant)
+      if (currentSizeRefId && sizeVariant.sizeReferenceId.toString() === currentSizeRefId) {
+        continue;
       }
 
-      // Update existing variants
-      if (sizesToUpdate.length > 0) {
-        const updatePromises = sizesToUpdate.map(async (sizeStock) => {
-          const existingVariant = existingVariantsMap.get(sizeStock.size)!;
-          
-          // Update variant with new stock and shared attributes (if they changed)
-          existingVariant.stock = sizeStock.stock;
-          existingVariant.name = finalName;
-          if (finalDescription !== undefined) {
-            existingVariant.description = finalDescription;
-          }
-          existingVariant.type = finalType;
-          existingVariant.price = finalPrice;
-          existingVariant.discount = finalDiscount;
-          existingVariant.finalPrice = finalFinalPrice;
-          
-          await existingVariant.save();
-          return existingVariant;
+      // Validate sizeReferenceId exists
+      const sizeRefId = sizeRefMap.get(sizeVariant.sizeReferenceId.toString());
+      if (!sizeRefId) {
+        throw new Error(`SizeReference with ID '${sizeVariant.sizeReferenceId}' not found.`);
+      }
+
+      const existingShirtSize = existingSizeRefMap.get(sizeVariant.sizeReferenceId.toString());
+
+      if (existingShirtSize) {
+        // Update existing ShirtSize
+        if (sizeVariant.price !== undefined) existingShirtSize.price = sizeVariant.price;
+        if (sizeVariant.imageURL !== undefined) existingShirtSize.imageURL = sizeVariant.imageURL;
+        if (sizeVariant.stock !== undefined) existingShirtSize.stock = sizeVariant.stock;
+        // finalPrice will be recalculated by pre-save hook
+        await existingShirtSize.save();
+        updatedShirtSizes.push(existingShirtSize);
+        updatedCount++;
+      } else {
+        // Create new ShirtSize
+        const finalPrice = calculateFinalPrice(sizeVariant.price, shirt.discount);
+
+        const newShirtSize = new ShirtSize({
+          shirtId: shirt._id,
+          sizeReferenceId: sizeVariant.sizeReferenceId,
+          price: sizeVariant.price,
+          imageURL: sizeVariant.imageURL,
+          stock: sizeVariant.stock,
+          finalPrice,
         });
 
-        const updated = await Promise.all(updatePromises);
-        updatedShirts.push(...(updated as unknown as IShirt[]));
-        updatedCount = updated.length;
-      }
-
-      // Create new variants
-      if (sizesToCreate.length > 0) {
-        const shirtsToCreate = sizesToCreate.map((sizeStock) => ({
-          sellerId,
-          name: finalName,
-          description: finalDescription,
-          size: sizeStock.size,
-          type: finalType,
-          price: finalPrice,
-          discount: finalDiscount,
-          finalPrice: finalFinalPrice,
-          stock: sizeStock.stock,
-        }));
-
-        const newlyCreated = await Shirt.insertMany(shirtsToCreate);
-        createdShirts.push(...(newlyCreated as unknown as IShirt[]));
-        createdCount = newlyCreated.length;
+        await newShirtSize.save();
+        createdShirtSizes.push(newShirtSize);
+        createdCount++;
       }
     }
   }
@@ -252,10 +303,21 @@ export const updateShirt = async (
   try {
     const queue = getQueue();
     if (queue) {
-        await queue.add('log-event', {
-          message: `Shirt updated: ${shirt.name} by seller ${sellerId}${updatedCount > 0 || createdCount > 0 ? `, ${updatedCount} variant(s) updated, ${createdCount} variant(s) created` : ''}`,
-          timestamp: new Date().toISOString(),
-        });
+      let logMessage = `Shirt updated: ${shirt.name} by user ${userId}`;
+      const logParts: string[] = [];
+      if (updatedCount > 0) {
+        logParts.push(`${updatedCount} variant(s) updated`);
+      }
+      if (createdCount > 0) {
+        logParts.push(`${createdCount} variant(s) created`);
+      }
+      if (logParts.length > 0) {
+        logMessage += `. ${logParts.join(', ')}.`;
+      }
+      await queue.add('log-event', {
+        message: logMessage,
+        timestamp: new Date().toISOString(),
+      });
     }
   } catch (error) {
     // Queue not available - log but don't fail the request
@@ -264,211 +326,380 @@ export const updateShirt = async (
 
   return {
     shirt,
-    updatedShirts,
-    createdShirts,
+    updatedShirtSizes,
+    createdShirtSizes,
     updatedCount,
     createdCount,
   };
 };
 
 /**
- * Retrieves a single shirt by ID
+ * Retrieves a single shirt by ID with all its size variants
  */
-export const getShirtById = async (shirtId: string): Promise<IShirt | null> => {
-  return Shirt.findById(shirtId);
+export const getShirtById = async (shirtId: string): Promise<{ shirt: IShirt; shirtSizes: any[] } | null> => {
+  const shirt = await Shirt.findById(shirtId)
+    .populate<{ shirtTypeId: { name: string } }>('shirtTypeId')
+    .lean();
+
+  if (!shirt) {
+    return null;
+  }
+
+  // Get ALL size variants for this shirt (no stock filtering)
+  // Returns all variants including those with stock = 0
+  const sizes = await ShirtSize.find({ shirtId: shirt._id })
+    .populate<{ sizeReferenceId: { _id: mongoose.Types.ObjectId; name: string; displayName: string; order: number } }>('sizeReferenceId', 'name displayName order')
+    .sort({ 'sizeReferenceId.order': 1 })
+    .lean();
+
+  // Transform to include sizeReference object (for frontend compatibility)
+  const shirtSizes = sizes.map((size: any) => {
+    const sizeRef = size.sizeReferenceId;
+    
+    return {
+      _id: size._id,
+      shirtId: size.shirtId,
+      sizeReferenceId: sizeRef._id || sizeRef,
+      sizeReference: {
+        _id: sizeRef._id || sizeRef,
+        name: sizeRef.name,
+        displayName: sizeRef.displayName,
+        order: sizeRef.order,
+      },
+      price: size.price,
+      imageURL: size.imageURL,
+      stock: size.stock, // Can be 0 - all variants returned regardless of stock
+      finalPrice: size.finalPrice,
+      createdAt: size.createdAt,
+      updatedAt: size.updatedAt,
+    };
+  });
+
+  return {
+    shirt: shirt as unknown as IShirt,
+    shirtSizes,
+  };
 };
 
 /**
  * Lists shirts with filtering, pagination, and caching
- * Uses Redis cache to reduce database load
- * Supports grouping by design (name + type + price)
+ * Joins Shirt and ShirtSize models
+ * Supports grouping by design (name + type)
  */
 export const listShirts = async (
   filters: ListShirtsInput
 ): Promise<{
-  shirts: IShirt[] | Array<{
-    _id: string;
-    sellerId: string;
-    name: string;
-    description?: string;
-    type: ShirtType;
-    price: number;
-    discount?: IDiscount;
-    finalPrice: number;
-    totalStock: number;
-    availableSizes: ShirtSize[];
-    variants: Array<{
-      _id: string;
-      size: ShirtSize;
-      stock: number;
-      finalPrice: number;
-    }>;
-  }>;
+  shirts: any[];
   total: number;
   page: number;
   limit: number;
   totalPages: number;
+  grouped?: boolean;
 }> => {
-  // Try to get from cache first (only if not grouping)
-  if (!filters.groupBy) {
-    const cached = await getCachedShirtList(filters);
-    if (cached) {
-      return JSON.parse(cached);
+  // Try to get from cache first (only for non-grouped results)
+  const cached = await getCachedShirtList(filters);
+  if (cached) {
+    return JSON.parse(cached);
+  }
+
+  // Build query for ShirtSize (where price, stock, finalPrice are)
+  const matchQuery: any = {};
+
+  // Resolve size filter - accept both sizeReferenceId and size (alias)
+  const sizeParam = (filters as any).sizeReferenceId || (filters as any).size;
+  if (sizeParam) {
+    try {
+      const sizeId = resolveSizeReference(sizeParam);
+      matchQuery.sizeReferenceId = new mongoose.Types.ObjectId(sizeId);
+    } catch (error: any) {
+      // Return error response for invalid size
+      throw new Error(error.message || 'Invalid size parameter');
     }
   }
 
-  // Build MongoDB query
-  const query: any = {};
-
-  // Size filter: if grouping, we'll filter after grouping
-  // If not grouping, apply size filter directly
-  if (filters.size && !filters.groupBy) {
-    query.size = filters.size;
-  }
-
-  if (filters.type) {
-    query.type = filters.type;
+  // Resolve type filter - will be applied in aggregation pipeline
+  let resolvedShirtTypeId: mongoose.Types.ObjectId | null = null;
+  const typeParam = (filters as any).shirtTypeId || (filters as any).type;
+  if (typeParam) {
+    try {
+      const typeId = resolveShirtType(typeParam);
+      resolvedShirtTypeId = new mongoose.Types.ObjectId(typeId);
+    } catch (error: any) {
+      // Return error response for invalid type
+      throw new Error(error.message || 'Invalid shirt type parameter');
+    }
   }
 
   if (filters.minPrice !== undefined || filters.maxPrice !== undefined) {
-    query.finalPrice = {};
+    matchQuery.finalPrice = {};
     if (filters.minPrice !== undefined) {
-      query.finalPrice.$gte = filters.minPrice;
+      matchQuery.finalPrice.$gte = filters.minPrice;
     }
     if (filters.maxPrice !== undefined) {
-      query.finalPrice.$lte = filters.maxPrice;
+      matchQuery.finalPrice.$lte = filters.maxPrice;
     }
   }
 
-  // If grouping by design, fetch all matching shirts and group them
   if (filters.groupBy === 'design') {
-    // Fetch all matching shirts (no pagination yet)
-    const allShirts = await Shirt.find(query)
-      .sort({ createdAt: -1 })
-      .lean();
+    // Group by design (name + type) using aggregation
+    const pipeline: any[] = [
+      { $match: matchQuery },
+      {
+        $lookup: {
+          from: 'shirts',
+          localField: 'shirtId',
+          foreignField: '_id',
+          as: 'shirt',
+        },
+      },
+      { $unwind: '$shirt' },
+      {
+        $lookup: {
+          from: 'shirttypes',
+          localField: 'shirt.shirtTypeId',
+          foreignField: '_id',
+          as: 'shirtType',
+        },
+      },
+      { $unwind: '$shirtType' },
+      {
+        $lookup: {
+          from: 'sizereferences',
+          localField: 'sizeReferenceId',
+          foreignField: '_id',
+          as: 'sizeReference',
+        },
+      },
+      { $unwind: '$sizeReference' },
+      // Filter by type if provided (using resolved ObjectId)
+      ...(resolvedShirtTypeId ? [{
+        $match: {
+          'shirt.shirtTypeId': resolvedShirtTypeId,
+        },
+      }] : []),
+      {
+        $group: {
+          _id: {
+            shirtId: '$shirtId',
+            name: '$shirt.name',
+            shirtTypeId: '$shirt.shirtTypeId',
+          },
+          shirt: { $first: '$shirt' },
+          shirtType: { $first: '$shirtType' },
+          discount: { $first: '$shirt.discount' },
+          variants: {
+            $push: {
+              _id: '$_id',
+              sizeReferenceId: '$sizeReferenceId',
+              sizeReference: '$sizeReference',
+              price: '$price',
+              imageURL: '$imageURL',
+              stock: '$stock',
+              finalPrice: '$finalPrice',
+            },
+          },
+          totalStock: { $sum: '$stock' },
+        },
+      },
+      {
+        $project: {
+          _id: '$shirt._id',
+          userId: '$shirt.userId',
+          name: '$shirt.name',
+          description: '$shirt.description',
+          shirtTypeId: '$shirt.shirtTypeId',
+          shirtType: '$shirtType.name',
+          discount: 1,
+          variants: 1,
+          totalStock: 1,
+        },
+      },
+      { $sort: { name: 1, 'shirtType.name': 1 } },
+    ];
 
-    // Group by name, type, and price
-    const designMap = new Map<string, IShirt[]>();
-    
-    for (const shirt of allShirts as IShirt[]) {
-      // Create a unique key for the design
-      const designKey = `${shirt.name}|${shirt.type}|${shirt.price}`;
-      
-      if (!designMap.has(designKey)) {
-        designMap.set(designKey, []);
-      }
-      designMap.get(designKey)!.push(shirt);
-    }
+    // Count total grouped designs
+    const totalGroupedDesigns = await ShirtSize.aggregate([
+      ...pipeline.slice(0, pipeline.length - 1), // Exclude sorting for count
+      { $count: 'total' },
+    ]);
 
-    // Convert map to grouped designs
-    const groupedDesigns = Array.from(designMap.values()).map((variants) => {
-      // Sort variants by size order (M, L, XL, XXL)
-      const sizeOrder: Record<ShirtSize, number> = { M: 0, L: 1, XL: 2, XXL: 3 };
-      variants.sort((a, b) => sizeOrder[a.size] - sizeOrder[b.size]);
+    const total = totalGroupedDesigns.length > 0 ? totalGroupedDesigns[0].total : 0;
 
-      // Use first variant for shared fields
-      const firstVariant = variants[0];
-      
-      // Calculate total stock
-      const totalStock = variants.reduce((sum, v) => sum + v.stock, 0);
-      
-      // Get available sizes (stock > 0)
-      const availableSizes = variants
-        .filter((v) => v.stock > 0)
-        .map((v) => v.size);
+    // Apply pagination
+    const skip = (filters.page - 1) * filters.limit;
+    pipeline.push({ $skip: skip });
+    pipeline.push({ $limit: filters.limit });
 
-      // Build variants array
-      const variantArray = variants.map((v) => ({
-        _id: v._id.toString(),
-        size: v.size,
-        stock: v.stock,
-        finalPrice: v.finalPrice,
-      }));
+    const groupedShirts = await ShirtSize.aggregate(pipeline);
+
+    // Sort variants within each grouped shirt by size order
+    const sizeOrderMap = new Map(
+      (await SizeReference.find({ isActive: true }).sort({ order: 1 }).lean())
+        .map(sr => [sr._id.toString(), sr.order])
+    );
+
+    const sortedGroupedShirts = groupedShirts.map((design: any) => {
+      const sortedVariants = design.variants.sort((a: any, b: any) => {
+        const orderA = sizeOrderMap.get(a.sizeReferenceId.toString()) || 999;
+        const orderB = sizeOrderMap.get(b.sizeReferenceId.toString()) || 999;
+        return orderA - orderB;
+      });
+
+      const availableSizes = sortedVariants
+        .filter((v: any) => v.stock > 0)
+        .map((v: any) => v.sizeReference.name);
 
       return {
-        _id: firstVariant._id.toString(),
-        sellerId: firstVariant.sellerId.toString(),
-        name: firstVariant.name,
-        description: firstVariant.description,
-        type: firstVariant.type,
-        price: firstVariant.price,
-        discount: firstVariant.discount,
-        finalPrice: firstVariant.finalPrice,
-        totalStock,
+        ...design,
+        variants: sortedVariants,
         availableSizes,
-        variants: variantArray,
       };
     });
 
-    // Apply size filter if provided (filter at design level)
-    let filteredDesigns = groupedDesigns;
-    if (filters.size) {
-      filteredDesigns = groupedDesigns.filter((design) =>
-        design.availableSizes.includes(filters.size!)
-      );
-    }
-
-    // Apply pagination to grouped designs
-    const total = filteredDesigns.length;
-    const skip = (filters.page - 1) * filters.limit;
-    const paginatedDesigns = filteredDesigns.slice(skip, skip + filters.limit);
-
-    const result = {
-      shirts: paginatedDesigns,
+    return {
+      shirts: sortedGroupedShirts,
       total,
       page: filters.page,
       limit: filters.limit,
       totalPages: Math.ceil(total / filters.limit),
+      grouped: true,
+    };
+  } else {
+    // Standard listing (no grouping) - join Shirt and ShirtSize
+    const skip = (filters.page - 1) * filters.limit;
+
+    // Use aggregation to join ShirtSize with Shirt
+    const pipeline: any[] = [
+      { $match: matchQuery },
+      {
+        $lookup: {
+          from: 'shirts',
+          localField: 'shirtId',
+          foreignField: '_id',
+          as: 'shirt',
+        },
+      },
+      { $unwind: '$shirt' },
+      // Filter by type if provided (using resolved ObjectId)
+      ...(resolvedShirtTypeId ? [{ $match: { 'shirt.shirtTypeId': resolvedShirtTypeId } }] : []),
+      {
+        $lookup: {
+          from: 'shirttypes',
+          localField: 'shirt.shirtTypeId',
+          foreignField: '_id',
+          as: 'shirtType',
+        },
+      },
+      { $unwind: '$shirtType' },
+      {
+        $lookup: {
+          from: 'sizereferences',
+          localField: 'sizeReferenceId',
+          foreignField: '_id',
+          as: 'sizeReference',
+        },
+      },
+      { $unwind: '$sizeReference' },
+      {
+        $project: {
+          _id: '$_id',
+          shirtId: '$shirtId',
+          userId: '$shirt.userId',
+          name: '$shirt.name',
+          description: '$shirt.description',
+          shirtTypeId: '$shirt.shirtTypeId',
+          shirtType: '$shirtType.name',
+          discount: '$shirt.discount',
+          sizeReferenceId: '$sizeReferenceId',
+          sizeReference: {
+            _id: '$sizeReference._id',
+            name: '$sizeReference.name',
+            displayName: '$sizeReference.displayName',
+          },
+          price: '$price',
+          imageURL: '$imageURL',
+          stock: '$stock',
+          finalPrice: '$finalPrice',
+          createdAt: '$createdAt',
+          updatedAt: '$updatedAt',
+        },
+      },
+      { $sort: { createdAt: -1 } },
+      { $skip: skip },
+      { $limit: filters.limit },
+    ];
+
+    const [shirts, totalResult] = await Promise.all([
+      ShirtSize.aggregate(pipeline),
+      ShirtSize.aggregate([
+        { $match: matchQuery },
+        {
+          $lookup: {
+            from: 'shirts',
+            localField: 'shirtId',
+            foreignField: '_id',
+            as: 'shirt',
+          },
+        },
+        { $unwind: '$shirt' },
+        // Filter by type if provided (using resolved ObjectId)
+        ...(resolvedShirtTypeId ? [{ $match: { 'shirt.shirtTypeId': resolvedShirtTypeId } }] : []),
+        { $count: 'total' },
+      ]),
+    ]);
+
+    const total = totalResult.length > 0 ? totalResult[0].total : 0;
+
+    const result = {
+      shirts,
+      total,
+      page: filters.page,
+      limit: filters.limit,
+      totalPages: Math.ceil(total / filters.limit),
+      grouped: false,
     };
 
-    // Don't cache grouped results (too complex to invalidate)
+    // Cache the result
+    await setCachedShirtList(filters, JSON.stringify(result));
+
     return result;
   }
-
-  // Standard behavior: return individual variants
-  const skip = (filters.page - 1) * filters.limit;
-  
-  const [shirts, total] = await Promise.all([
-    Shirt.find(query)
-      .sort({ createdAt: -1 }) // Newest first
-      .skip(skip)
-      .limit(filters.limit)
-      .lean(),
-    Shirt.countDocuments(query),
-  ]);
-
-  const result = {
-    shirts: shirts as IShirt[],
-    total,
-    page: filters.page,
-    limit: filters.limit,
-    totalPages: Math.ceil(total / filters.limit),
-  };
-
-  // Cache the result
-  await setCachedShirtList(filters, JSON.stringify(result));
-
-  return result;
 };
 
 /**
- * Deletes a shirt
- * Only allows seller to delete their own shirts
+ * Deletes a shirt and all its size variants
+ * Only allows user to delete their own shirts
  */
 export const deleteShirt = async (
   shirtId: string,
-  sellerId: string
+  userId: string
 ): Promise<boolean> => {
-  const result = await Shirt.deleteOne({
-    _id: shirtId,
-    sellerId,
-  });
-
-  if (result.deletedCount > 0) {
-    await invalidateShirtListCache();
-    return true;
+  // Verify ownership
+  const shirt = await Shirt.findOne({ _id: shirtId, userId });
+  if (!shirt) {
+    return false;
   }
 
+  // Delete all ShirtSize entries for this shirt
+  await ShirtSize.deleteMany({ shirtId: shirt._id });
+
+  // Delete the shirt
+  const result = await Shirt.deleteOne({ _id: shirtId, userId });
+
+  if (result.deletedCount && result.deletedCount > 0) {
+    await invalidateShirtListCache();
+    try {
+      const queue = getQueue();
+      if (queue) {
+        await queue.add('log-event', {
+          message: `Shirt deleted: ${shirtId} by user ${userId}`,
+          timestamp: new Date().toISOString(),
+        });
+      }
+    } catch (error) {
+      console.warn('Queue operation failed:', error);
+    }
+    return true;
+  }
   return false;
 };
-

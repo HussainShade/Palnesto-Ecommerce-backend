@@ -10,10 +10,14 @@ const CACHE_TTL = 300; // 5 minutes
  */
 const generateCacheKey = (filters) => {
     const parts = ['shirts:list'];
-    if (filters.size)
-        parts.push(`size:${filters.size}`);
-    if (filters.type)
-        parts.push(`type:${filters.type}`);
+    // Use sizeReferenceId or size (normalize to same key)
+    const sizeParam = filters.sizeReferenceId || filters.size;
+    if (sizeParam)
+        parts.push(`size:${sizeParam}`);
+    // Use shirtTypeId or type (normalize to same key)
+    const typeParam = filters.shirtTypeId || filters.type;
+    if (typeParam)
+        parts.push(`type:${typeParam}`);
     if (filters.minPrice !== undefined)
         parts.push(`minPrice:${filters.minPrice}`);
     if (filters.maxPrice !== undefined)

@@ -5,7 +5,8 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "seed": "tsx src/scripts/seed.ts"
+    "seed": "tsx src/scripts/seed.ts",
+    "seed:reference": "tsx src/scripts/seed-reference-data.ts"
   },
   "dependencies": {
     "@hono/node-server": "^1.19.6",

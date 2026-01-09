@@ -8,6 +8,7 @@ import { closeRedisClient } from './config/redis.js';
 import { initializeQueue, closeQueue } from './config/queue.js';
 import authRoutes from './routes/auth.routes.js';
 import shirtRoutes from './routes/shirt.routes.js';
+import adminRoutes from './routes/admin.routes.js';
 import { errorHandler, notFoundHandler } from './middlewares/error.middleware.js';
 /**
  * Main application bootstrap
@@ -72,6 +73,7 @@ app.get('/health', (c) => {
 // API routes
 app.route('/api/auth', authRoutes);
 app.route('/api/shirts', shirtRoutes);
+app.route('/api/admin', adminRoutes);
 // Error handling
 app.onError(errorHandler);
 app.notFound(notFoundHandler);

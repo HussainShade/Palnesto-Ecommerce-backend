@@ -10,10 +10,235 @@ http://localhost:5000
 
 This API uses **HTTP-only cookies** for authentication. After logging in, the JWT token is automatically stored in a cookie named `auth_token`. 
 
+**User Types:**
+- **Administrator**: Can create seller accounts and manage the platform (UserType: "Admin")
+- **Seller**: Can create, update, and delete shirts (UserType: "Seller")
+- **Customer**: Can view shirts and manage their account (UserType: "Customer")
+
+## Model Structure
+
+**Important:** The data model has been refactored to support price and imageURL per size variant:
+
+- **Shirt**: Represents a shirt design/product with common attributes (name, description, type, discount)
+- **ShirtSize**: Represents a size variant of a shirt with size-specific attributes (price, imageURL, stock)
+- **SizeReference**: Reference table for available sizes (M, L, XL, XXL)
+- **Discount**: Applied at the Shirt level (common to all size variants)
+- **Price**: Varies by size (stored in ShirtSize)
+- **ImageURL**: Can vary by size (stored in ShirtSize)
+
 **Important for Postman:**
 - Postman automatically handles cookies, but you need to enable cookie handling
 - After login, the cookie is automatically sent with subsequent requests
 - No need to manually add Authorization headers
+- Different endpoints for seller and customer authentication (see below)
+
+---
+
+## Model Schemas
+
+This section documents all MongoDB models and their schemas used in the API.
+
+### UserType Model
+
+Reference table for user roles/types (e.g., Seller, Admin, Customer).
+
+**Schema:**
+```typescript
+{
+  name: string;           // Required, unique, indexed (e.g., 'Seller', 'Admin', 'Customer')
+  description?: string;   // Optional description
+  isActive: boolean;     // Default: true, indexed
+  createdAt: Date;       // Auto-generated timestamp
+  updatedAt: Date;       // Auto-generated timestamp
+}
+```
+
+**Indexes:**
+- `name` (unique)
+- `isActive`
+
+**Collection Name:** `usertypes`
+
+---
+
+### User Model
+
+User accounts for all user types (replaces old Seller model for scalability).
+
+**Schema:**
+```typescript
+{
+  email: string;                    // Required, unique, lowercase, trimmed, indexed
+  password: string;                 // Required, min 6 chars, auto-hashed on save
+  name: string;                     // Required, trimmed
+  userTypeId: ObjectId;             // Required, foreign key to UserType, indexed
+  isActive: boolean;                // Default: true, indexed
+  createdAt: Date;                  // Auto-generated timestamp
+  updatedAt: Date;                  // Auto-generated timestamp
+}
+```
+
+**Methods:**
+- `comparePassword(candidatePassword: string): Promise<boolean>` - Compares plain text password with hashed password
+
+**Hooks:**
+- `pre('save')` - Automatically hashes password before saving
+
+**Indexes:**
+- `email` (unique)
+- `userTypeId`
+- `isActive`
+
+**Collection Name:** `users`
+
+---
+
+### ShirtType Model
+
+Reference table for shirt types (e.g., Casual, Formal, Wedding, Sports, Vintage).
+
+**Schema:**
+```typescript
+{
+  name: string;           // Required, unique, trimmed, indexed (e.g., 'Casual', 'Formal')
+  description?: string;   // Optional description
+  isActive: boolean;     // Default: true, indexed
+  createdAt: Date;       // Auto-generated timestamp
+  updatedAt: Date;       // Auto-generated timestamp
+}
+```
+
+**Indexes:**
+- `name` (unique)
+- `isActive`
+
+**Collection Name:** `shirttypes`
+
+---
+
+### SizeReference Model
+
+Reference table for available shirt sizes (e.g., M, L, XL, XXL).
+
+**Schema:**
+```typescript
+{
+  name: string;          // Required, unique, uppercase, trimmed (e.g., 'M', 'L', 'XL', 'XXL')
+  displayName: string;   // Required, trimmed (e.g., 'Medium', 'Large')
+  order: number;         // Required, unique (for sorting: M=0, L=1, XL=2, XXL=3)
+  isActive: boolean;     // Default: true
+  createdAt: Date;       // Auto-generated timestamp
+  updatedAt: Date;       // Auto-generated timestamp
+}
+```
+
+**Indexes:**
+- `name` (unique)
+- `order` (unique)
+
+**Collection Name:** `sizereferences`
+
+---
+
+### Shirt Model
+
+Represents a shirt design/product with common attributes shared across all size variants.
+
+**Schema:**
+```typescript
+{
+  userId: ObjectId;      // Required, foreign key to User, indexed
+  name: string;          // Required, trimmed
+  description?: string;  // Optional, trimmed
+  shirtTypeId: ObjectId; // Required, foreign key to ShirtType, indexed
+  discount?: {           // Optional discount (applied to all size variants)
+    type: 'amount' | 'percentage';
+    value: number;      // Min: 0
+  };
+  createdAt: Date;       // Auto-generated timestamp
+  updatedAt: Date;       // Auto-generated timestamp
+}
+```
+
+**Indexes:**
+- `userId`
+- `shirtTypeId`
+- Compound: `{ userId: 1, shirtTypeId: 1 }`
+
+**Collection Name:** `shirts`
+
+**Note:** Price, imageURL, and stock are stored in the `ShirtSize` model (varies by size). Discount is common to all size variants of this shirt.
+
+---
+
+### ShirtSize Model
+
+Represents a specific size variant of a shirt with size-specific attributes (price, imageURL, stock).
+
+**Schema:**
+```typescript
+{
+  shirtId: ObjectId;           // Required, foreign key to Shirt, indexed
+  sizeReferenceId: ObjectId;   // Required, foreign key to SizeReference, indexed
+  price: number;              // Required, min: 0, max: 10000 (varies by size)
+  imageURL?: string;          // Optional, trimmed (can vary by size)
+  stock: number;             // Required, min: 0, default: 0
+  finalPrice: number;         // Required, min: 0, indexed (computed: price with discount)
+  createdAt: Date;           // Auto-generated timestamp
+  updatedAt: Date;           // Auto-generated timestamp
+}
+```
+
+**Hooks:**
+- `pre('save')` - Automatically calculates `finalPrice` by applying discount from parent `Shirt`:
+  - Percentage discount: `finalPrice = price * (1 - discount.value / 100)`
+  - Amount discount: `finalPrice = price - discount.value`
+  - Rounded to 2 decimal places
+
+**Indexes:**
+- `shirtId`
+- `sizeReferenceId`
+- `finalPrice`
+- Compound: `{ sizeReferenceId: 1, finalPrice: 1 }`
+- Compound (unique, sparse): `{ shirtId: 1, sizeReferenceId: 1 }` - Ensures one size variant per shirt
+
+**Collection Name:** `shirtsizes`
+
+**Note:** Each `Shirt` can have multiple `ShirtSize` entries (one per size). Price and imageURL can vary by size, while discount is inherited from the parent `Shirt`.
+
+---
+
+### Model Relationships
+
+```
+UserType (1) ──< (many) User
+                    │
+                    │ (1)
+                    │
+                    └───< (many) Shirt
+                                 │
+                                 │ (1)
+                                 │
+                                 └───< (many) ShirtSize
+                                              │
+                                              │ (many)
+                                              │
+                                              └───> (1) SizeReference
+
+ShirtType (1) ──< (many) Shirt
+```
+
+**Key Relationships:**
+- `User.userTypeId` → `UserType._id` (many-to-one)
+- `User._id` → `Shirt.userId` (one-to-many)
+- `Shirt.shirtTypeId` → `ShirtType._id` (many-to-one)
+- `Shirt._id` → `ShirtSize.shirtId` (one-to-many)
+- `ShirtSize.sizeReferenceId` → `SizeReference._id` (many-to-one)
+
+**Foreign Key Constraints:**
+- All foreign keys are MongoDB ObjectIds
+- References are validated at the application level
+- Use `populate()` to fetch related documents
 
 ---
 
@@ -41,11 +266,173 @@ None required
 
 ---
 
-### 2. Seller Login
+### 2. Administrator Login
 
-**POST** `/api/auth/login`
+**POST** `/api/admin/login`
+
+Authenticate an administrator and receive a JWT token in an HTTP-only cookie.
+
+**Headers:**
+```
+Content-Type: application/json
+```
+
+**Request Body:**
+```json
+{
+  "email": "admin@example.com",
+  "password": "admin123"
+}
+```
+
+**Validation Rules:**
+- `email`: Must be a valid email format
+- `password`: Minimum 6 characters
+
+**Success Response (200 OK):**
+```json
+{
+  "success": true,
+  "message": "Admin login successful",
+  "data": {
+    "user": {
+      "id": "65a1b2c3d4e5f6g7h8i9j0k1",
+      "email": "admin@example.com",
+      "name": "Administrator"
+    },
+    "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+  }
+}
+```
+
+**Note:** The token is automatically set as an HTTP-only cookie (`auth_token`) and included in the response body for testing.
+
+**Error Responses:**
+
+*Invalid credentials (401):*
+```json
+{
+  "success": false,
+  "message": "Invalid email or password"
+}
+```
+
+*Access denied (401):*
+```json
+{
+  "success": false,
+  "message": "Access denied. Administrator account required."
+}
+```
+
+*Validation error (400):*
+```json
+{
+  "success": false,
+  "message": "Validation error",
+  "errors": [
+    {
+      "code": "invalid_string",
+      "path": ["email"],
+      "message": "Invalid email format"
+    }
+  ]
+}
+```
+
+---
+
+### 3. Create Seller (Admin Only)
+
+**POST** `/api/admin/sellers`
+
+Create a new seller account. Only accessible by administrators.
+
+**Headers:**
+```
+Content-Type: application/json
+Cookie: auth_token=<jwt_token> (automatically sent by Postman after admin login)
+```
+
+**Request Body:**
+```json
+{
+  "email": "newseller@example.com",
+  "password": "seller123",
+  "name": "New Seller"
+}
+```
+
+**Validation Rules:**
+- `email`: Must be a valid email format, unique
+- `password`: Minimum 6 characters
+- `name`: Required, 1-100 characters
+
+**Success Response (201 Created):**
+```json
+{
+  "success": true,
+  "message": "Seller account created successfully",
+  "data": {
+    "seller": {
+      "id": "65a1b2c3d4e5f6g7h8i9j0k2",
+      "email": "newseller@example.com",
+      "name": "New Seller"
+    }
+  }
+}
+```
+
+**Error Responses:**
+
+*Unauthorized (401):*
+```json
+{
+  "success": false,
+  "message": "Authentication required"
+}
+```
+
+*Forbidden (403):*
+```json
+{
+  "success": false,
+  "message": "Access denied. Administrator privileges required."
+}
+```
+
+*User already exists (409 Conflict):*
+```json
+{
+  "success": false,
+  "message": "User with this email already exists"
+}
+```
+
+*Validation error (400):*
+```json
+{
+  "success": false,
+  "message": "Validation error",
+  "errors": [
+    {
+      "code": "invalid_string",
+      "path": ["email"],
+      "message": "Invalid email format"
+    }
+  ]
+}
+```
+
+---
+
+### 4. Seller Login
+
+**POST** `/api/auth/seller/login` or `/api/auth/login` (legacy)
 
 Authenticate a seller and receive a JWT token in an HTTP-only cookie.
+
+**Note:** Uses User model with UserType "Seller" (replaces old Seller model for better scalability).
 
 **Headers:**
 ```
@@ -114,11 +501,142 @@ Content-Type: application/json
 
 ---
 
-### 3. Seller Logout
+### 5. Customer Signup
 
-**POST** `/api/auth/logout`
+**POST** `/api/auth/customer/signup`
 
-Logout and clear the authentication cookie.
+Create a new customer account. Automatically logs in the user after signup.
+
+**Headers:**
+```
+Content-Type: application/json
+```
+
+**Request Body:**
+```json
+{
+  "email": "customer@example.com",
+  "password": "password123",
+  "name": "John Doe"
+}
+```
+
+**Validation Rules:**
+- `email`: Must be a valid email format, unique
+- `password`: Minimum 6 characters
+- `name`: Required, 1-100 characters
+
+**Success Response (201 Created):**
+```json
+{
+  "success": true,
+  "message": "Customer account created successfully",
+  "data": {
+    "user": {
+      "id": "65a1b2c3d4e5f6g7h8i9j0k1",
+      "email": "customer@example.com",
+      "name": "John Doe"
+    },
+    "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+  }
+}
+```
+
+**Note:** The token is automatically set as an HTTP-only cookie (`auth_token`) and included in the response body for testing.
+
+**Error Responses:**
+
+*User already exists (409 Conflict):*
+```json
+{
+  "success": false,
+  "message": "User with this email already exists"
+}
+```
+
+*Validation error (400):*
+```json
+{
+  "success": false,
+  "message": "Validation error",
+  "errors": [
+    {
+      "code": "invalid_string",
+      "path": ["email"],
+      "message": "Invalid email format"
+    }
+  ]
+}
+```
+
+---
+
+### 6. Customer Login
+
+**POST** `/api/auth/customer/login`
+
+Authenticate a customer and receive a JWT token in an HTTP-only cookie.
+
+**Headers:**
+```
+Content-Type: application/json
+```
+
+**Request Body:**
+```json
+{
+  "email": "customer@example.com",
+  "password": "password123"
+}
+```
+
+**Validation Rules:**
+- `email`: Must be a valid email format
+- `password`: Minimum 6 characters
+
+**Success Response (200 OK):**
+```json
+{
+  "success": true,
+  "message": "Login successful",
+  "data": {
+    "user": {
+      "id": "65a1b2c3d4e5f6g7h8i9j0k1",
+      "email": "customer@example.com",
+      "name": "John Doe"
+    },
+    "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+  }
+}
+```
+
+**Note:** The token is automatically set as an HTTP-only cookie (`auth_token`) and included in the response body for testing.
+
+**Error Responses:**
+
+*Invalid credentials (401):*
+```json
+{
+  "success": false,
+  "message": "Invalid email or password"
+}
+```
+
+*Access denied (401):*
+```json
+{
+  "success": false,
+  "message": "Access denied. Customer account required."
+}
+```
+
+---
+
+### 7. Logout
+
+**POST** `/api/auth/logout` or `/api/auth/seller/logout` or `/api/auth/customer/logout`
+
+Logout and clear the authentication cookie. Works for both sellers and customers.
 
 **Headers:**
 ```
@@ -140,7 +658,7 @@ None
 
 ---
 
-### 4. List Shirts (Public)
+### 8. List Shirts (Public)
 
 **GET** `/api/shirts`
 
@@ -156,13 +674,29 @@ None required
 **Query Parameters:**
 | Parameter | Type | Required | Description | Example |
 |-----------|------|----------|-------------|---------|
-| `size` | string | No | Filter by size (M, L, XL, XXL) | `?size=L` |
-| `type` | string | No | Filter by type (Casual, Formal, Wedding, Sports, Vintage) | `?type=Formal` |
+| `sizeReferenceId` | string | No | Filter by size (ObjectId or string: M, L, XL, XXL) | `?sizeReferenceId=M` or `?sizeReferenceId=65a1b2c3d4e5f6g7h8i9j0k10` |
+| `size` | string | No | Alias for `sizeReferenceId` (string format only) | `?size=M` |
+| `shirtTypeId` | string | No | Filter by type (ObjectId or string: Casual, Formal, etc.) | `?shirtTypeId=Casual` or `?shirtTypeId=65a1b2c3d4e5f6g7h8i9j0k11` |
+| `type` | string | No | Alias for `shirtTypeId` (string format only) | `?type=Casual` |
 | `minPrice` | number | No | Minimum final price | `?minPrice=1000` |
 | `maxPrice` | number | No | Maximum final price | `?maxPrice=5000` |
 | `page` | number | No | Page number (default: 1) | `?page=1` |
 | `limit` | number | No | Items per page (default: 10, max: 100) | `?limit=20` |
 | `groupBy` | string | No | Group shirts by design (name+type+price). Values: `"design"` | `?groupBy=design` |
+
+**Filter Format Support:**
+- **ObjectId format** (backward compatible): `?sizeReferenceId=65a1b2c3d4e5f6g7h8i9j0k10`
+- **String format** (new, developer-friendly): `?size=M` or `?sizeReferenceId=M`
+- **Type string format** (new): `?type=Casual` or `?shirtTypeId=Casual`
+- **Mixed format** (also supported): `?size=M&shirtTypeId=65a1b2c3d4e5f6g7h8i9j0k11`
+
+**Valid Size Values** (case-insensitive, will be converted to uppercase):
+- `M`, `L`, `XL`, `XXL`
+
+**Valid Type Values** (case-insensitive):
+- `Casual`, `Formal`, `Wedding`, `Sports`, `Vintage`
+
+**Note:** The API accepts both MongoDB ObjectIds and human-readable string values for filtering. String values are automatically resolved to ObjectIds using an in-memory cache for optimal performance. Invalid string values will return a 400 error with a descriptive message.
 
 **Example Requests:**
 
@@ -171,9 +705,15 @@ None required
 GET /api/shirts
 ```
 
-*Filter by size and type:*
+*Filter by size and type (using string values - recommended):*
 ```
-GET /api/shirts?size=L&type=Formal
+GET /api/shirts?size=M&type=Casual
+GET /api/shirts?sizeReferenceId=L&shirtTypeId=Formal
+```
+
+*Filter by size and type (using ObjectIds - backward compatible):*
+```
+GET /api/shirts?sizeReferenceId=65a1b2c3d4e5f6g7h8i9j0k10&shirtTypeId=65a1b2c3d4e5f6g7h8i9j0k11
 ```
 
 *Filter by price range with pagination:*
@@ -181,9 +721,14 @@ GET /api/shirts?size=L&type=Formal
 GET /api/shirts?minPrice=1000&maxPrice=3000&page=1&limit=20
 ```
 
-*Combined filters:*
+*Combined filters (using string values):*
 ```
 GET /api/shirts?size=M&type=Casual&minPrice=1500&maxPrice=2500&page=1&limit=10
+```
+
+*Mixed format (ObjectId + string):*
+```
+GET /api/shirts?size=M&shirtTypeId=65a1b2c3d4e5f6g7h8i9j0k11
 ```
 
 *Get grouped designs (one record per design with all size variants):*
@@ -191,7 +736,7 @@ GET /api/shirts?size=M&type=Casual&minPrice=1500&maxPrice=2500&page=1&limit=10
 GET /api/shirts?groupBy=design&page=1&limit=12
 ```
 
-*Get grouped designs with filters:*
+*Get grouped designs with filters (using string values):*
 ```
 GET /api/shirts?groupBy=design&type=Casual&minPrice=1000&maxPrice=3000&page=1&limit=12
 ```
@@ -205,19 +750,28 @@ GET /api/shirts?groupBy=design&type=Casual&minPrice=1000&maxPrice=3000&page=1&li
   "data": {
     "shirts": [
       {
-        "_id": "65a1b2c3d4e5f6g7h8i9j0k2",
-        "sellerId": "65a1b2c3d4e5f6g7h8i9j0k1",
+        "_id": "65a1b2c3d4e5f6g7h8i9j0k20",
+        "shirtId": "65a1b2c3d4e5f6g7h8i9j0k2",
+        "userId": "65a1b2c3d4e5f6g7h8i9j0k1",
         "name": "Classic White Formal Shirt",
         "description": "Perfect for business meetings and formal occasions",
-        "size": "L",
-        "type": "Formal",
-        "price": 2500,
+        "shirtTypeId": "65a1b2c3d4e5f6g7h8i9j0k11",
+        "shirtType": "Formal",
         "discount": {
           "type": "percentage",
           "value": 10
         },
-        "finalPrice": 2250,
+        "sizeReferenceId": "65a1b2c3d4e5f6g7h8i9j0k10",
+        "sizeRef": {
+          "_id": "65a1b2c3d4e5f6g7h8i9j0k10",
+          "name": "L",
+          "displayName": "Large",
+          "order": 1
+        },
+        "price": 2500,
+        "imageURL": "https://fastly.picsum.photos/id/193/200/200.jpg?hmac=JHo5tWHSRWvVbL3HX6rwDNdkvYPFojLtXkEGEUCgz6A",
         "stock": 50,
+        "finalPrice": 2250,
         "createdAt": "2024-01-15T10:30:00.000Z",
         "updatedAt": "2024-01-15T10:30:00.000Z"
       }
@@ -225,7 +779,8 @@ GET /api/shirts?groupBy=design&type=Casual&minPrice=1000&maxPrice=3000&page=1&li
     "total": 25,
     "page": 1,
     "limit": 10,
-    "totalPages": 3
+    "totalPages": 3,
+    "grouped": false
   }
 }
 ```
@@ -238,34 +793,57 @@ GET /api/shirts?groupBy=design&type=Casual&minPrice=1000&maxPrice=3000&page=1&li
     "shirts": [
       {
         "_id": "65a1b2c3d4e5f6g7h8i9j0k2",
-        "sellerId": "65a1b2c3d4e5f6g7h8i9j0k1",
+        "userId": "65a1b2c3d4e5f6g7h8i9j0k1",
         "name": "Premium Cotton Shirt",
         "description": "High-quality cotton fabric for comfort",
-        "type": "Casual",
-        "price": 2000,
+        "shirtTypeId": "65a1b2c3d4e5f6g7h8i9j0k11",
+        "shirtType": "Casual",
         "discount": {
           "type": "percentage",
           "value": 15
         },
-        "finalPrice": 1700,
         "totalStock": 75,
         "availableSizes": ["M", "L", "XL"],
         "variants": [
           {
-            "_id": "65a1b2c3d4e5f6g7h8i9j0k2",
-            "size": "M",
+            "_id": "65a1b2c3d4e5f6g7h8i9j0k20",
+            "sizeReferenceId": "65a1b2c3d4e5f6g7h8i9j0k12",
+            "sizeRef": {
+              "_id": "65a1b2c3d4e5f6g7h8i9j0k12",
+              "name": "M",
+              "displayName": "Medium",
+              "order": 0
+            },
+            "price": 2000,
+            "imageURL": "https://fastly.picsum.photos/id/193/200/200.jpg?hmac=JHo5tWHSRWvVbL3HX6rwDNdkvYPFojLtXkEGEUCgz6A",
             "stock": 30,
             "finalPrice": 1700
           },
           {
-            "_id": "65a1b2c3d4e5f6g7h8i9j0k3",
-            "size": "L",
+            "_id": "65a1b2c3d4e5f6g7h8i9j0k21",
+            "sizeReferenceId": "65a1b2c3d4e5f6g7h8i9j0k10",
+            "sizeRef": {
+              "_id": "65a1b2c3d4e5f6g7h8i9j0k10",
+              "name": "L",
+              "displayName": "Large",
+              "order": 1
+            },
+            "price": 2000,
+            "imageURL": "https://fastly.picsum.photos/id/193/200/200.jpg?hmac=JHo5tWHSRWvVbL3HX6rwDNdkvYPFojLtXkEGEUCgz6A",
             "stock": 25,
             "finalPrice": 1700
           },
           {
-            "_id": "65a1b2c3d4e5f6g7h8i9j0k4",
-            "size": "XL",
+            "_id": "65a1b2c3d4e5f6g7h8i9j0k22",
+            "sizeReferenceId": "65a1b2c3d4e5f6g7h8i9j0k13",
+            "sizeRef": {
+              "_id": "65a1b2c3d4e5f6g7h8i9j0k13",
+              "name": "XL",
+              "displayName": "Extra Large",
+              "order": 2
+            },
+            "price": 2000,
+            "imageURL": "https://fastly.picsum.photos/id/193/200/200.jpg?hmac=JHo5tWHSRWvVbL3HX6rwDNdkvYPFojLtXkEGEUCgz6A",
             "stock": 20,
             "finalPrice": 1700
           }
@@ -275,7 +853,8 @@ GET /api/shirts?groupBy=design&type=Casual&minPrice=1000&maxPrice=3000&page=1&li
     "total": 25,
     "page": 1,
     "limit": 12,
-    "totalPages": 3
+    "totalPages": 3,
+    "grouped": true
   }
 }
 ```
@@ -283,37 +862,65 @@ GET /api/shirts?groupBy=design&type=Casual&minPrice=1000&maxPrice=3000&page=1&li
 **Response Format Details:**
 
 **Standard Response (without `groupBy`):**
-- Returns individual shirt variants (one record per size)
-- Each record has `size` and `stock` fields
+- Returns individual `ShirtSize` variants (one record per size variant)
+- Each record represents a `ShirtSize` document with:
+  - `_id`: ShirtSize document ID
+  - `shirtId`: Reference to the parent `Shirt` design
+  - `sizeReferenceId`: Reference to `SizeReference` (M, L, XL, XXL)
+  - `price`: Price for this specific size (varies by size)
+  - `imageURL`: Image URL for this specific size (can vary by size)
+  - `stock`: Stock quantity for this size
+  - `finalPrice`: Calculated price with discount applied
 - Pagination is based on individual variants
+- Includes populated `sizeRef` object with size details
 
 **Grouped Response (with `groupBy=design`):**
-- Returns one record per unique design (grouped by name + type + price)
+- Returns one record per unique shirt design (grouped by name + type)
 - Each record includes:
-  - Shared fields: `name`, `description`, `type`, `price`, `discount`, `finalPrice`
+  - `_id`: Main `Shirt` design ID
+  - Shared fields: `name`, `description`, `shirtTypeId`, `discount`
   - `totalStock`: Sum of all variant stocks
-  - `availableSizes`: Array of sizes with stock > 0
-  - `variants`: Array of all size variants for this design
+  - `availableSizes`: Array of size names (strings) with stock > 0
+  - `variants`: Array of all `ShirtSize` variants for this design
+- Each variant in `variants` includes: `_id`, `sizeReferenceId`, `sizeRef`, `price`, `imageURL`, `stock`, `finalPrice`
 - Pagination is based on unique designs (not individual variants)
-- `_id` is the first variant's ID (useful for navigation)
+- Variants are sorted by size order (M, L, XL, XXL)
 
 **Notes:**
-- When `groupBy=design`, the `size` filter works at the design level (design must have at least one variant matching the size)
-- All variants in a design share the same `name`, `type`, and `price`
-- Variants are sorted by size order (M, L, XL, XXL)
-- `availableSizes` only includes sizes with stock > 0
+- When `groupBy=design`, the `sizeReferenceId` filter works at the design level (design must have at least one variant matching the size)
+- All variants in a design share the same `name`, `shirtTypeId`, and `discount`
+- Price and imageURL can vary by size (stored in each `ShirtSize` variant)
+- `availableSizes` only includes size names (strings) with stock > 0
 - Grouped results are not cached (too complex to invalidate)
 
-**Error Response (400 Bad Request):**
+**Error Responses:**
+
+*Invalid size string (400 Bad Request):*
+```json
+{
+  "success": false,
+  "message": "Invalid size: 'XXL'. Valid sizes are: M, L, XL, XXL"
+}
+```
+
+*Invalid type string (400 Bad Request):*
+```json
+{
+  "success": false,
+  "message": "Invalid shirt type: 'InvalidType'. Valid types are: Casual, Formal, Wedding, Sports, Vintage"
+}
+```
+
+*Validation error (400 Bad Request):*
 ```json
 {
   "success": false,
   "message": "Validation error",
   "errors": [
     {
-      "code": "invalid_enum_value",
-      "path": ["size"],
-      "message": "Invalid enum value. Expected 'M' | 'L' | 'XL' | 'XXL', received 'XXL'"
+      "code": "invalid_string",
+      "path": ["sizeReferenceId"],
+      "message": "Must be a valid ObjectId or non-empty string"
     }
   ]
 }
@@ -321,7 +928,7 @@ GET /api/shirts?groupBy=design&type=Casual&minPrice=1000&maxPrice=3000&page=1&li
 
 ---
 
-### 5. Get Single Shirt (Public)
+### 9. Get Single Shirt (Public)
 
 **GET** `/api/shirts/:id`
 
@@ -351,24 +958,104 @@ GET /api/shirts/65a1b2c3d4e5f6g7h8i9j0k2
   "data": {
     "shirt": {
       "_id": "65a1b2c3d4e5f6g7h8i9j0k2",
-      "sellerId": "65a1b2c3d4e5f6g7h8i9j0k1",
+      "userId": "65a1b2c3d4e5f6g7h8i9j0k1",
       "name": "Classic White Formal Shirt",
       "description": "Perfect for business meetings and formal occasions",
-      "size": "L",
-      "type": "Formal",
-      "price": 2500,
+      "shirtTypeId": "65a1b2c3d4e5f6g7h8i9j0k11",
       "discount": {
         "type": "percentage",
         "value": 10
       },
-      "finalPrice": 2250,
-      "stock": 50,
       "createdAt": "2024-01-15T10:30:00.000Z",
       "updatedAt": "2024-01-15T10:30:00.000Z"
-    }
+    },
+    "shirtSizes": [
+      {
+        "_id": "65a1b2c3d4e5f6g7h8i9j0k20",
+        "shirtId": "65a1b2c3d4e5f6g7h8i9j0k2",
+        "sizeReferenceId": "65a1b2c3d4e5f6g7h8i9j0k10",
+        "sizeReference": {
+          "_id": "65a1b2c3d4e5f6g7h8i9j0k10",
+          "name": "L",
+          "displayName": "Large",
+          "order": 1
+        },
+        "price": 2500,
+        "imageURL": "https://fastly.picsum.photos/id/193/200/200.jpg?hmac=JHo5tWHSRWvVbL3HX6rwDNdkvYPFojLtXkEGEUCgz6A",
+        "stock": 50,
+        "finalPrice": 2250,
+        "createdAt": "2024-01-15T10:30:00.000Z",
+        "updatedAt": "2024-01-15T10:30:00.000Z"
+      },
+      {
+        "_id": "65a1b2c3d4e5f6g7h8i9j0k21",
+        "shirtId": "65a1b2c3d4e5f6g7h8i9j0k2",
+        "sizeReferenceId": "65a1b2c3d4e5f6g7h8i9j0k11",
+        "sizeReference": {
+          "_id": "65a1b2c3d4e5f6g7h8i9j0k11",
+          "name": "XL",
+          "displayName": "Extra Large",
+          "order": 2
+        },
+        "price": 2600,
+        "imageURL": "https://fastly.picsum.photos/id/193/200/200.jpg?hmac=JHo5tWHSRWvVbL3HX6rwDNdkvYPFojLtXkEGEUCgz6A",
+        "stock": 30,
+        "finalPrice": 2340,
+        "createdAt": "2024-01-15T10:30:00.000Z",
+        "updatedAt": "2024-01-15T10:30:00.000Z"
+      },
+      {
+        "_id": "65a1b2c3d4e5f6g7h8i9j0k22",
+        "shirtId": "65a1b2c3d4e5f6g7h8i9j0k2",
+        "sizeReferenceId": "65a1b2c3d4e5f6g7h8i9j0k12",
+        "sizeReference": {
+          "_id": "65a1b2c3d4e5f6g7h8i9j0k12",
+          "name": "M",
+          "displayName": "Medium",
+          "order": 0
+        },
+        "price": 2400,
+        "imageURL": "https://fastly.picsum.photos/id/193/200/200.jpg?hmac=JHo5tWHSRWvVbL3HX6rwDNdkvYPFojLtXkEGEUCgz6A",
+        "stock": 0,
+        "finalPrice": 2160,
+        "createdAt": "2024-01-15T10:30:00.000Z",
+        "updatedAt": "2024-01-15T10:30:00.000Z"
+      }
+    ],
+    "sizes": [
+      // Same as shirtSizes (alias for backward compatibility)
+    ]
   }
 }
 ```
+
+**Response Details:**
+- **`shirt`**: The main `Shirt` design document with common attributes (name, description, type, discount)
+- **`shirtSizes`**: Array of ALL `ShirtSize` variants for this shirt design, including:
+  - Variants with `stock > 0` (available)
+  - Variants with `stock = 0` (out of stock)
+  - **No filtering by stock** - all variants are returned
+- **`sizes`**: Alias for `shirtSizes` (included for backward compatibility)
+
+**Each `shirtSize` variant includes:**
+- `_id`: ShirtSize document ID
+- `shirtId`: Reference to the parent `Shirt` design
+- `sizeReferenceId`: ObjectId reference to `SizeReference`
+- `sizeReference`: Populated object with size details:
+  - `_id`: SizeReference ObjectId
+  - `name`: Size code (e.g., "M", "L", "XL", "XXL")
+  - `displayName`: Human-readable name (e.g., "Medium", "Large")
+  - `order`: Sort order (0 for M, 1 for L, 2 for XL, 3 for XXL)
+- `price`: Price for this specific size (varies by size)
+- `imageURL`: Image URL for this specific size (can vary by size)
+- `stock`: Stock quantity (can be 0)
+- `finalPrice`: Calculated price with discount applied from parent `Shirt`
+- `createdAt`, `updatedAt`: Timestamps
+
+**Sorting:**
+- Variants are sorted by `sizeReference.order` (M, L, XL, XXL) for consistent display
+
+**Note:** The response includes ALL `ShirtSize` variants for the given shirt design ID, regardless of stock value. The frontend should handle displaying only available sizes or showing out-of-stock indicators.
 
 **Error Response (404 Not Found):**
 ```json
@@ -380,7 +1067,7 @@ GET /api/shirts/65a1b2c3d4e5f6g7h8i9j0k2
 
 ---
 
-### 6. Create Shirt (Protected)
+### 10. Create Shirt (Protected)
 
 **POST** `/api/shirts`
 
@@ -397,14 +1084,17 @@ Cookie: auth_token=<jwt_token> (automatically sent by Postman after login)
 {
   "name": "Premium Cotton Shirt",
   "description": "High-quality cotton fabric for comfort",
-  "size": "M",
-  "type": "Casual",
-  "price": 2000,
+  "shirtTypeId": "65a1b2c3d4e5f6g7h8i9j0k11",
   "discount": {
     "type": "percentage",
     "value": 15
   },
-  "stock": 30
+  "sizeVariant": {
+    "sizeReferenceId": "65a1b2c3d4e5f6g7h8i9j0k12",
+    "price": 2000,
+    "imageURL": "https://fastly.picsum.photos/id/193/200/200.jpg?hmac=JHo5tWHSRWvVbL3HX6rwDNdkvYPFojLtXkEGEUCgz6A",
+    "stock": 30
+  }
 }
 ```
 
@@ -413,11 +1103,19 @@ Cookie: auth_token=<jwt_token> (automatically sent by Postman after login)
 |-------|------|----------|-------------|-------------|
 | `name` | string | Yes | Shirt name | 1-200 characters |
 | `description` | string | No | Shirt description | Max 1000 characters |
-| `size` | string | Yes | Shirt size | M, L, XL, or XXL |
-| `type` | string | Yes | Shirt type | Casual, Formal, Wedding, Sports, or Vintage |
-| `price` | number | Yes | Base price | 0-10000 |
-| `discount` | object | No | Discount details | See discount schema below |
+| `shirtTypeId` | string | Yes | Shirt type ObjectId | Valid MongoDB ObjectId |
+| `discount` | object | No | Discount details (applied to all sizes) | See discount schema below |
+| `sizeVariant` | object | Yes | Initial size variant | See sizeVariant schema below |
+
+**sizeVariant Object:**
+| Field | Type | Required | Description | Constraints |
+|-------|------|----------|-------------|-------------|
+| `sizeReferenceId` | string | Yes | Size reference ObjectId | Valid MongoDB ObjectId |
+| `price` | number | Yes | Price for this size | 0-10000 |
+| `imageURL` | string | No | Image URL for this size | Valid URL format |
 | `stock` | number | No | Stock quantity | Integer, min 0 (default: 0) |
+
+**Note:** `shirtTypeId` and `sizeReferenceId` must be valid MongoDB ObjectIds from the ShirtType and SizeReference collections. Run `npm run seed:reference` to populate reference data.
 
 **Discount Object:**
 ```json
@@ -433,14 +1131,17 @@ Cookie: auth_token=<jwt_token> (automatically sent by Postman after login)
 ```json
 {
   "name": "Summer Casual Shirt",
-  "size": "L",
-  "type": "Casual",
-  "price": 1800,
+  "shirtTypeId": "65a1b2c3d4e5f6g7h8i9j0k11",
   "discount": {
     "type": "percentage",
     "value": 20
   },
-  "stock": 25
+  "sizeVariant": {
+    "sizeReferenceId": "65a1b2c3d4e5f6g7h8i9j0k10",
+    "price": 1800,
+    "imageURL": "https://fastly.picsum.photos/id/193/200/200.jpg?hmac=JHo5tWHSRWvVbL3HX6rwDNdkvYPFojLtXkEGEUCgz6A",
+    "stock": 25
+  }
 }
 ```
 
@@ -448,14 +1149,17 @@ Cookie: auth_token=<jwt_token> (automatically sent by Postman after login)
 ```json
 {
   "name": "Formal Business Shirt",
-  "size": "XL",
-  "type": "Formal",
-  "price": 3000,
+  "shirtTypeId": "65a1b2c3d4e5f6g7h8i9j0k14",
   "discount": {
     "type": "amount",
     "value": 500
   },
-  "stock": 40
+  "sizeVariant": {
+    "sizeReferenceId": "65a1b2c3d4e5f6g7h8i9j0k13",
+    "price": 3000,
+    "imageURL": "https://fastly.picsum.photos/id/193/200/200.jpg?hmac=JHo5tWHSRWvVbL3HX6rwDNdkvYPFojLtXkEGEUCgz6A",
+    "stock": 40
+  }
 }
 ```
 
@@ -464,10 +1168,13 @@ Cookie: auth_token=<jwt_token> (automatically sent by Postman after login)
 {
   "name": "Wedding Shirt",
   "description": "Elegant shirt for special occasions",
-  "size": "L",
-  "type": "Wedding",
-  "price": 4500,
-  "stock": 20
+  "shirtTypeId": "65a1b2c3d4e5f6g7h8i9j0k15",
+  "sizeVariant": {
+    "sizeReferenceId": "65a1b2c3d4e5f6g7h8i9j0k10",
+    "price": 4500,
+    "imageURL": "https://fastly.picsum.photos/id/193/200/200.jpg?hmac=JHo5tWHSRWvVbL3HX6rwDNdkvYPFojLtXkEGEUCgz6A",
+    "stock": 20
+  }
 }
 ```
 
@@ -479,18 +1186,25 @@ Cookie: auth_token=<jwt_token> (automatically sent by Postman after login)
   "data": {
     "shirt": {
       "_id": "65a1b2c3d4e5f6g7h8i9j0k3",
-      "sellerId": "65a1b2c3d4e5f6g7h8i9j0k1",
+      "userId": "65a1b2c3d4e5f6g7h8i9j0k1",
       "name": "Premium Cotton Shirt",
       "description": "High-quality cotton fabric for comfort",
-      "size": "M",
-      "type": "Casual",
-      "price": 2000,
+      "shirtTypeId": "65a1b2c3d4e5f6g7h8i9j0k11",
       "discount": {
         "type": "percentage",
         "value": 15
       },
-      "finalPrice": 1700,
+      "createdAt": "2024-01-15T10:30:00.000Z",
+      "updatedAt": "2024-01-15T10:30:00.000Z"
+    },
+    "shirtSize": {
+      "_id": "65a1b2c3d4e5f6g7h8i9j0k20",
+      "shirtId": "65a1b2c3d4e5f6g7h8i9j0k3",
+      "sizeReferenceId": "65a1b2c3d4e5f6g7h8i9j0k12",
+      "price": 2000,
+      "imageURL": "https://fastly.picsum.photos/id/193/200/200.jpg?hmac=JHo5tWHSRWvVbL3HX6rwDNdkvYPFojLtXkEGEUCgz6A",
       "stock": 30,
+      "finalPrice": 1700,
       "createdAt": "2024-01-15T10:30:00.000Z",
       "updatedAt": "2024-01-15T10:30:00.000Z"
     }
@@ -525,7 +1239,7 @@ Cookie: auth_token=<jwt_token> (automatically sent by Postman after login)
 
 ---
 
-### 7. Batch Create Shirts (Protected)
+### 11. Batch Create Shirts (Protected)
 
 **POST** `/api/shirts/batch`
 
@@ -542,16 +1256,29 @@ Cookie: auth_token=<jwt_token> (automatically sent by Postman after login)
 {
   "name": "Premium Cotton Shirt",
   "description": "High-quality cotton fabric for comfort",
-  "type": "Casual",
-  "price": 2000,
+  "shirtTypeId": "65a1b2c3d4e5f6g7h8i9j0k11",
   "discount": {
     "type": "percentage",
     "value": 15
   },
   "sizes": [
-    { "size": "M", "stock": 30 },
-    { "size": "L", "stock": 25 },
-    { "size": "XL", "stock": 20 }
+    {
+      "sizeReferenceId": "65a1b2c3d4e5f6g7h8i9j0k12",
+      "price": 2000,
+      "imageURL": "https://fastly.picsum.photos/id/193/200/200.jpg?hmac=JHo5tWHSRWvVbL3HX6rwDNdkvYPFojLtXkEGEUCgz6A",
+      "stock": 30
+    },
+    {
+      "sizeReferenceId": "65a1b2c3d4e5f6g7h8i9j0k10",
+      "price": 2100,
+      "imageURL": "https://fastly.picsum.photos/id/193/200/200.jpg?hmac=JHo5tWHSRWvVbL3HX6rwDNdkvYPFojLtXkEGEUCgz6A",
+      "stock": 25
+    },
+    {
+      "sizeReferenceId": "65a1b2c3d4e5f6g7h8i9j0k13",
+      "price": 2200,
+      "stock": 20
+    }
   ]
 }
 ```
@@ -561,16 +1288,20 @@ Cookie: auth_token=<jwt_token> (automatically sent by Postman after login)
 |-------|------|----------|-------------|-------------|
 | `name` | string | Yes | Shirt name | 1-200 characters |
 | `description` | string | No | Shirt description | Max 1000 characters |
-| `type` | string | Yes | Shirt type | Casual, Formal, Wedding, Sports, or Vintage |
-| `price` | number | Yes | Base price | 0-10000 |
-| `discount` | object | No | Discount details | See discount schema below |
-| `sizes` | array | Yes | Array of size/stock pairs | Min 1, no duplicates, at least one with stock > 0 |
+| `shirtTypeId` | string | Yes | Shirt type ObjectId | Valid MongoDB ObjectId |
+| `discount` | object | No | Discount details (applied to all sizes) | See discount schema below |
+| `sizes` | array | Yes | Array of size variants | Min 1, no duplicates, at least one with stock > 0 |
 
 **Sizes Array:**
-- Each object must have `size` (M, L, XL, or XXL) and `stock` (integer, min 0)
-- No duplicate sizes allowed
+- Each object must have:
+  - `sizeReferenceId` (MongoDB ObjectId): Reference to SizeReference
+  - `price` (number): Price for this specific size (0-10000)
+  - `imageURL` (string, optional): Image URL for this specific size
+  - `stock` (integer, min 0): Stock quantity for this size
+- No duplicate `sizeReferenceId` values allowed
 - At least one size must have stock > 0
 - Only sizes with stock > 0 will be created
+- Price and imageURL can vary by size
 
 **Example Requests:**
 
@@ -578,16 +1309,27 @@ Cookie: auth_token=<jwt_token> (automatically sent by Postman after login)
 ```json
 {
   "name": "Summer Casual Shirt",
-  "type": "Casual",
-  "price": 1800,
+  "shirtTypeId": "65a1b2c3d4e5f6g7h8i9j0k11",
   "discount": {
     "type": "percentage",
     "value": 20
   },
   "sizes": [
-    { "size": "M", "stock": 25 },
-    { "size": "L", "stock": 30 },
-    { "size": "XL", "stock": 15 }
+    {
+      "sizeReferenceId": "65a1b2c3d4e5f6g7h8i9j0k12",
+      "price": 1800,
+      "stock": 25
+    },
+    {
+      "sizeReferenceId": "65a1b2c3d4e5f6g7h8i9j0k10",
+      "price": 1900,
+      "stock": 30
+    },
+    {
+      "sizeReferenceId": "65a1b2c3d4e5f6g7h8i9j0k13",
+      "price": 2000,
+      "stock": 15
+    }
   ]
 }
 ```
@@ -597,15 +1339,22 @@ Cookie: auth_token=<jwt_token> (automatically sent by Postman after login)
 {
   "name": "Formal Business Shirt",
   "description": "Professional attire",
-  "type": "Formal",
-  "price": 3000,
+  "shirtTypeId": "65a1b2c3d4e5f6g7h8i9j0k14",
   "discount": {
     "type": "amount",
     "value": 500
   },
   "sizes": [
-    { "size": "L", "stock": 40 },
-    { "size": "XL", "stock": 35 }
+    {
+      "sizeReferenceId": "65a1b2c3d4e5f6g7h8i9j0k10",
+      "price": 3000,
+      "stock": 40
+    },
+    {
+      "sizeReferenceId": "65a1b2c3d4e5f6g7h8i9j0k13",
+      "price": 3100,
+      "stock": 35
+    }
   ]
 }
 ```
@@ -615,13 +1364,28 @@ Cookie: auth_token=<jwt_token> (automatically sent by Postman after login)
 {
   "name": "Wedding Shirt",
   "description": "Elegant shirt for special occasions",
-  "type": "Wedding",
-  "price": 4500,
+  "shirtTypeId": "65a1b2c3d4e5f6g7h8i9j0k15",
   "sizes": [
-    { "size": "M", "stock": 20 },
-    { "size": "L", "stock": 25 },
-    { "size": "XL", "stock": 20 },
-    { "size": "XXL", "stock": 15 }
+    {
+      "sizeReferenceId": "65a1b2c3d4e5f6g7h8i9j0k12",
+      "price": 4500,
+      "stock": 20
+    },
+    {
+      "sizeReferenceId": "65a1b2c3d4e5f6g7h8i9j0k10",
+      "price": 4600,
+      "stock": 25
+    },
+    {
+      "sizeReferenceId": "65a1b2c3d4e5f6g7h8i9j0k13",
+      "price": 4700,
+      "stock": 20
+    },
+    {
+      "sizeReferenceId": "65a1b2c3d4e5f6g7h8i9j0k16",
+      "price": 4800,
+      "stock": 15
+    }
   ]
 }
 ```
@@ -630,57 +1394,51 @@ Cookie: auth_token=<jwt_token> (automatically sent by Postman after login)
 ```json
 {
   "success": true,
-  "message": "Successfully created 3 shirt(s)",
+  "message": "Successfully created 3 shirt variant(s) for design \"Premium Cotton Shirt\"",
   "data": {
-    "shirts": [
+    "shirt": {
+      "_id": "65a1b2c3d4e5f6g7h8i9j0k3",
+      "userId": "65a1b2c3d4e5f6g7h8i9j0k1",
+      "name": "Premium Cotton Shirt",
+      "description": "High-quality cotton fabric for comfort",
+      "shirtTypeId": "65a1b2c3d4e5f6g7h8i9j0k11",
+      "discount": {
+        "type": "percentage",
+        "value": 15
+      },
+      "createdAt": "2024-01-15T10:30:00.000Z",
+      "updatedAt": "2024-01-15T10:30:00.000Z"
+    },
+    "shirtSizes": [
       {
-        "_id": "65a1b2c3d4e5f6g7h8i9j0k3",
-        "sellerId": "65a1b2c3d4e5f6g7h8i9j0k1",
-        "name": "Premium Cotton Shirt",
-        "description": "High-quality cotton fabric for comfort",
-        "size": "M",
-        "type": "Casual",
+        "_id": "65a1b2c3d4e5f6g7h8i9j0k20",
+        "shirtId": "65a1b2c3d4e5f6g7h8i9j0k3",
+        "sizeReferenceId": "65a1b2c3d4e5f6g7h8i9j0k12",
         "price": 2000,
-        "discount": {
-          "type": "percentage",
-          "value": 15
-        },
-        "finalPrice": 1700,
+        "imageURL": "https://fastly.picsum.photos/id/193/200/200.jpg?hmac=JHo5tWHSRWvVbL3HX6rwDNdkvYPFojLtXkEGEUCgz6A",
         "stock": 30,
+        "finalPrice": 1700,
         "createdAt": "2024-01-15T10:30:00.000Z",
         "updatedAt": "2024-01-15T10:30:00.000Z"
       },
       {
-        "_id": "65a1b2c3d4e5f6g7h8i9j0k4",
-        "sellerId": "65a1b2c3d4e5f6g7h8i9j0k1",
-        "name": "Premium Cotton Shirt",
-        "description": "High-quality cotton fabric for comfort",
-        "size": "L",
-        "type": "Casual",
-        "price": 2000,
-        "discount": {
-          "type": "percentage",
-          "value": 15
-        },
-        "finalPrice": 1700,
+        "_id": "65a1b2c3d4e5f6g7h8i9j0k21",
+        "shirtId": "65a1b2c3d4e5f6g7h8i9j0k3",
+        "sizeReferenceId": "65a1b2c3d4e5f6g7h8i9j0k10",
+        "price": 2100,
+        "imageURL": "https://fastly.picsum.photos/id/193/200/200.jpg?hmac=JHo5tWHSRWvVbL3HX6rwDNdkvYPFojLtXkEGEUCgz6A",
         "stock": 25,
+        "finalPrice": 1785,
         "createdAt": "2024-01-15T10:30:00.000Z",
         "updatedAt": "2024-01-15T10:30:00.000Z"
       },
       {
-        "_id": "65a1b2c3d4e5f6g7h8i9j0k5",
-        "sellerId": "65a1b2c3d4e5f6g7h8i9j0k1",
-        "name": "Premium Cotton Shirt",
-        "description": "High-quality cotton fabric for comfort",
-        "size": "XL",
-        "type": "Casual",
-        "price": 2000,
-        "discount": {
-          "type": "percentage",
-          "value": 15
-        },
-        "finalPrice": 1700,
+        "_id": "65a1b2c3d4e5f6g7h8i9j0k22",
+        "shirtId": "65a1b2c3d4e5f6g7h8i9j0k3",
+        "sizeReferenceId": "65a1b2c3d4e5f6g7h8i9j0k13",
+        "price": 2200,
         "stock": 20,
+        "finalPrice": 1870,
         "createdAt": "2024-01-15T10:30:00.000Z",
         "updatedAt": "2024-01-15T10:30:00.000Z"
       }
@@ -688,6 +1446,8 @@ Cookie: auth_token=<jwt_token> (automatically sent by Postman after login)
   }
 }
 ```
+
+**Note:** The response includes one `Shirt` design and multiple `ShirtSize` variants. All variants share the same `name`, `description`, `shirtTypeId`, and `discount`, but each has its own `price`, `imageURL`, and `stock`.
 
 **Error Responses:**
 
@@ -731,14 +1491,15 @@ Cookie: auth_token=<jwt_token> (automatically sent by Postman after login)
 
 **Notes:**
 - Only sizes with `stock > 0` are created (sizes with stock = 0 are filtered out)
-- All created shirts share the same `name`, `description`, `type`, `price`, and `discount`
-- Each shirt has a unique `size` and `stock` value
-- `finalPrice` is calculated automatically based on `price` and `discount`
+- All created variants share the same `name`, `description`, `shirtTypeId`, and `discount`
+- Each variant has its own `sizeReferenceId`, `price`, `imageURL`, and `stock`
+- `finalPrice` is calculated automatically for each variant based on its `price` and the shared `discount`
+- Price and imageURL can vary by size
 - Cache is invalidated after batch creation
 
 ---
 
-### 7. Update Shirt (Protected)
+### 12. Update Shirt (Protected)
 
 **PUT** `/api/shirts/:id`
 
@@ -768,24 +1529,36 @@ All fields are optional (partial update). Only include fields you want to update
 **Standard Update:**
 ```json
 {
-  "price": 2500,
-  "stock": 35
+  "name": "Updated Shirt Name",
+  "description": "Updated description"
 }
 ```
 
-**Update with New Size Variants:**
+**Update with Size Variants:**
 ```json
 {
   "name": "Updated Shirt Name",
-  "price": 2500,
-  "stock": 35,
   "discount": {
     "type": "percentage",
     "value": 20
   },
+  "currentSizeVariant": {
+    "price": 2500,
+    "imageURL": "https://fastly.picsum.photos/id/193/200/200.jpg?hmac=JHo5tWHSRWvVbL3HX6rwDNdkvYPFojLtXkEGEUCgz6A",
+    "stock": 35
+  },
   "sizes": [
-    { "size": "L", "stock": 30 },
-    { "size": "XL", "stock": 25 }
+    {
+      "sizeReferenceId": "65a1b2c3d4e5f6g7h8i9j0k10",
+      "price": 2600,
+      "imageURL": "https://fastly.picsum.photos/id/193/200/200.jpg?hmac=JHo5tWHSRWvVbL3HX6rwDNdkvYPFojLtXkEGEUCgz6A",
+      "stock": 30
+    },
+    {
+      "sizeReferenceId": "65a1b2c3d4e5f6g7h8i9j0k13",
+      "price": 2700,
+      "stock": 25
+    }
   ]
 }
 ```
@@ -795,26 +1568,34 @@ All fields are optional (partial update). Only include fields you want to update
 |-------|------|----------|-------------|
 | `name` | string | No | Shirt name |
 | `description` | string | No | Shirt description |
-| `type` | string | No | Shirt type |
-| `price` | number | No | Base price |
-| `discount` | object | No | Discount details |
-| `stock` | number | No | Stock quantity for current shirt |
-| `sizes` | array | No | Array of size/stock pairs to update existing or create new variants |
+| `shirtTypeId` | string | No | Shirt type ObjectId |
+| `discount` | object | No | Discount details (applied to all variants) |
+| `currentSizeVariant` | object | No | Update for the main shirt's size variant |
+| `sizes` | array | No | Array of size variants to update existing or create new variants |
+
+**currentSizeVariant Object (Optional):**
+- Updates the main shirt's current size variant
+- Fields: `price`, `imageURL`, `stock` (all optional)
 
 **Sizes Array (Optional):**
-- If provided, updates existing variants or creates new shirt records for additional sizes
-- Each object must have `size` (M, L, XL, or XXL) and `stock` (integer, min 0)
-- No duplicate sizes allowed in the array
-- Only sizes with stock > 0 are created
-- Skips sizes that already exist (same seller, same name, same size)
-- Skips the current shirt's size (it's being updated, not created)
+- If provided, updates existing variants or creates new variants for additional sizes
+- Each object must have:
+  - `sizeReferenceId` (MongoDB ObjectId): Reference to SizeReference
+  - `price` (number): Price for this size
+  - `imageURL` (string, optional): Image URL for this size
+  - `stock` (integer, min 0): Stock quantity
+- No duplicate `sizeReferenceId` values allowed
+- Updates existing variants (same user, same name, same size) with new price, imageURL, stock, and shared attributes
+- Creates new variants for sizes that don't exist
+- Skips the current shirt's size (it's updated via `currentSizeVariant`)
 
 **Example Requests:**
 
-*Update price only:*
+*Update name and description only:*
 ```json
 {
-  "price": 2200
+  "name": "Updated Shirt Name",
+  "description": "Updated description"
 }
 ```
 
@@ -828,15 +1609,12 @@ All fields are optional (partial update). Only include fields you want to update
 }
 ```
 
-*Update multiple fields:*
+*Update current size variant:*
 ```json
 {
-  "name": "Updated Shirt Name",
-  "price": 2800,
-  "stock": 50,
-  "discount": {
-    "type": "amount",
-    "value": 300
+  "currentSizeVariant": {
+    "price": 2800,
+    "stock": 50
   }
 }
 ```
@@ -852,23 +1630,35 @@ All fields are optional (partial update). Only include fields you want to update
 ```json
 {
   "name": "Premium Cotton Shirt",
-  "price": 2000,
   "discount": {
     "type": "percentage",
     "value": 15
   },
   "sizes": [
-    { "size": "L", "stock": 30 },
-    { "size": "XL", "stock": 25 },
-    { "size": "XXL", "stock": 20 }
+    {
+      "sizeReferenceId": "65a1b2c3d4e5f6g7h8i9j0k10",
+      "price": 2000,
+      "stock": 30
+    },
+    {
+      "sizeReferenceId": "65a1b2c3d4e5f6g7h8i9j0k13",
+      "price": 2100,
+      "stock": 25
+    },
+    {
+      "sizeReferenceId": "65a1b2c3d4e5f6g7h8i9j0k16",
+      "price": 2200,
+      "stock": 20
+    }
   ]
 }
 ```
 
 **Note:** 
-- If the current shirt is size "M", and you include `{ "size": "M", "stock": 10 }` in the sizes array, it will be skipped (the current shirt is being updated via main update, not through sizes array)
-- **Existing variants** (same seller, same name, different size) will be **updated** with new stock and shared attributes (name, description, type, price, discount), not skipped
-- **New variants** (sizes that don't exist) will be **created** with the provided stock and shared attributes
+- The `currentSizeVariant` field updates the main shirt's current size variant
+- If a size in the `sizes` array matches the current shirt's size, it will be skipped (use `currentSizeVariant` instead)
+- **Existing variants** (same user, same name, different size) will be **updated** with new price, imageURL, stock, and shared attributes (name, description, shirtTypeId, discount)
+- **New variants** (sizes that don't exist) will be **created** with the provided price, imageURL, stock, and shared attributes
 
 **Success Response (200 OK):**
 
@@ -880,22 +1670,19 @@ All fields are optional (partial update). Only include fields you want to update
   "data": {
     "shirt": {
       "_id": "65a1b2c3d4e5f6g7h8i9j0k2",
-      "sellerId": "65a1b2c3d4e5f6g7h8i9j0k1",
+      "userId": "65a1b2c3d4e5f6g7h8i9j0k1",
       "name": "Updated Shirt Name",
-      "size": "L",
-      "type": "Formal",
-      "price": 2800,
+      "description": "Updated description",
+      "shirtTypeId": "65a1b2c3d4e5f6g7h8i9j0k14",
       "discount": {
         "type": "amount",
         "value": 300
       },
-      "finalPrice": 2500,
-      "stock": 50,
       "createdAt": "2024-01-15T10:30:00.000Z",
       "updatedAt": "2024-01-15T10:35:00.000Z"
     },
-    "updatedShirts": [],
-    "createdShirts": [],
+    "updatedShirtSizes": [],
+    "createdShirtSizes": [],
     "updatedCount": 0,
     "createdCount": 0
   }
@@ -910,68 +1697,48 @@ All fields are optional (partial update). Only include fields you want to update
   "data": {
     "shirt": {
       "_id": "65a1b2c3d4e5f6g7h8i9j0k2",
-      "sellerId": "65a1b2c3d4e5f6g7h8i9j0k1",
+      "userId": "65a1b2c3d4e5f6g7h8i9j0k1",
       "name": "Premium Cotton Shirt",
-      "size": "M",
-      "type": "Casual",
-      "price": 2000,
+      "description": "High-quality cotton fabric for comfort",
+      "shirtTypeId": "65a1b2c3d4e5f6g7h8i9j0k11",
       "discount": {
         "type": "percentage",
         "value": 15
       },
-      "finalPrice": 1700,
-      "stock": 35,
       "createdAt": "2024-01-15T10:30:00.000Z",
       "updatedAt": "2024-01-15T10:35:00.000Z"
     },
-    "updatedShirts": [
+    "updatedShirtSizes": [
       {
-        "_id": "65a1b2c3d4e5f6g7h8i9j0k6",
-        "sellerId": "65a1b2c3d4e5f6g7h8i9j0k1",
-        "name": "Premium Cotton Shirt",
-        "size": "L",
-        "type": "Casual",
+        "_id": "65a1b2c3d4e5f6g7h8i9j0k21",
+        "shirtId": "65a1b2c3d4e5f6g7h8i9j0k2",
+        "sizeReferenceId": "65a1b2c3d4e5f6g7h8i9j0k10",
         "price": 2000,
-        "discount": {
-          "type": "percentage",
-          "value": 15
-        },
-        "finalPrice": 1700,
+        "imageURL": "https://fastly.picsum.photos/id/193/200/200.jpg?hmac=JHo5tWHSRWvVbL3HX6rwDNdkvYPFojLtXkEGEUCgz6A",
         "stock": 30,
+        "finalPrice": 1700,
         "createdAt": "2024-01-15T09:00:00.000Z",
         "updatedAt": "2024-01-15T10:35:00.000Z"
       },
       {
-        "_id": "65a1b2c3d4e5f6g7h8i9j0k7",
-        "sellerId": "65a1b2c3d4e5f6g7h8i9j0k1",
-        "name": "Premium Cotton Shirt",
-        "size": "XL",
-        "type": "Casual",
-        "price": 2000,
-        "discount": {
-          "type": "percentage",
-          "value": 15
-        },
-        "finalPrice": 1700,
+        "_id": "65a1b2c3d4e5f6g7h8i9j0k22",
+        "shirtId": "65a1b2c3d4e5f6g7h8i9j0k2",
+        "sizeReferenceId": "65a1b2c3d4e5f6g7h8i9j0k13",
+        "price": 2100,
         "stock": 25,
+        "finalPrice": 1785,
         "createdAt": "2024-01-15T09:00:00.000Z",
         "updatedAt": "2024-01-15T10:35:00.000Z"
       }
     ],
-    "createdShirts": [
+    "createdShirtSizes": [
       {
-        "_id": "65a1b2c3d4e5f6g7h8i9j0k8",
-        "sellerId": "65a1b2c3d4e5f6g7h8i9j0k1",
-        "name": "Premium Cotton Shirt",
-        "size": "XXL",
-        "type": "Casual",
-        "price": 2000,
-        "discount": {
-          "type": "percentage",
-          "value": 15
-        },
-        "finalPrice": 1700,
+        "_id": "65a1b2c3d4e5f6g7h8i9j0k23",
+        "shirtId": "65a1b2c3d4e5f6g7h8i9j0k2",
+        "sizeReferenceId": "65a1b2c3d4e5f6g7h8i9j0k16",
+        "price": 2200,
         "stock": 20,
+        "finalPrice": 1870,
         "createdAt": "2024-01-15T10:35:00.000Z",
         "updatedAt": "2024-01-15T10:35:00.000Z"
       }
@@ -1017,19 +1784,21 @@ All fields are optional (partial update). Only include fields you want to update
 
 **Notes:**
 - **Backward Compatible**: If `sizes` array is not provided, endpoint works as before (standard update)
-- **Update Existing Variants**: If a variant exists (same seller, same name, same size), it's updated with:
-  - New stock value
-  - Updated shared attributes (name, description, type, price, discount, finalPrice)
-- **Create New Variants**: If a variant doesn't exist, a new shirt record is created
-- **Current Size Skipped**: The current shirt's size is automatically skipped in the sizes array (it's updated via main update)
+- **Update Existing Variants**: If a variant exists (same user, same name, same size), it's updated with:
+  - New price, imageURL, and stock values
+  - Updated shared attributes (name, description, shirtTypeId, discount)
+  - Recalculated finalPrice based on new price and discount
+- **Create New Variants**: If a variant doesn't exist, a new `ShirtSize` record is created
+- **Current Size Skipped**: The current shirt's size is automatically skipped in the sizes array (use `currentSizeVariant` to update it)
 - **Stock Filtering**: Only sizes with stock > 0 are processed (sizes with stock = 0 are filtered out)
-- **Shared Attributes**: All variants (updated and created) inherit name, description, type, price, and discount from the updated shirt
+- **Shared Attributes**: All variants (updated and created) inherit name, description, shirtTypeId, and discount from the updated shirt
+- **Price and ImageURL**: Can vary by size (each variant has its own price and imageURL)
 - **Operation Order**: Main shirt update happens first, then variants are updated/created
-- **Security**: Only variants belonging to the same seller and having the same name are updated (prevents unauthorized updates)
+- **Security**: Only variants belonging to the same user and having the same name are updated (prevents unauthorized updates)
 
 ---
 
-### 9. Delete Shirt (Protected)
+### 13. Delete Shirt (Protected)
 
 **DELETE** `/api/shirts/:id`
 
@@ -1098,36 +1867,55 @@ DELETE /api/shirts/65a1b2c3d4e5f6g7h8i9j0k2
 ```
 Shirt Ecommerce API
 ├── Auth
-│   ├── Login
+│   ├── Seller Login
+│   ├── Customer Signup
+│   ├── Customer Login
 │   └── Logout
-└── Shirts (Protected)
-    ├── Create Shirt
-    ├── Update Shirt
-    └── Delete Shirt
+├── Admin (Admin only)
+│   ├── Admin Login
+│   └── Create Seller
+└── Shirts
+    ├── List Shirts (Public)
+    ├── Get Single Shirt (Public)
+    └── Protected (Seller only)
+        ├── Create Shirt
+        ├── Batch Create Shirts
+        ├── Update Shirt
+        └── Delete Shirt
 ```
 
 ### 3. Testing Flow
 
-**Step 1: Login**
-1. Send `POST /api/auth/login` with credentials
-2. Postman automatically stores the `auth_token` cookie
-3. Verify in Postman's "Cookies" tab (click "Cookies" link at bottom)
+**Step 1: Login/Signup**
+- **For Administrators**: Send `POST /api/admin/login` with admin credentials
+- **For Sellers**: Send `POST /api/auth/seller/login` with seller credentials (sellers must be created by admin first)
+- **For Customers**: 
+  - Send `POST /api/auth/customer/signup` to create account (auto-login)
+  - Or send `POST /api/auth/customer/login` with customer credentials
+- Postman automatically stores the `auth_token` cookie
+- Verify in Postman's "Cookies" tab (click "Cookies" link at bottom)
 
-**Step 2: Use Protected Endpoints**
+**Step 2: Use Endpoints**
 1. Public endpoints (`GET /api/shirts`, `GET /api/shirts/:id`) work without authentication
-2. Protected endpoints (`POST`, `PUT`, `DELETE /api/shirts/*`) will automatically include the cookie
-3. No need to manually add headers
+2. Protected endpoints (`POST`, `PUT`, `DELETE /api/shirts/*`) require seller authentication
+3. Cookie is automatically included in requests
+4. No need to manually add headers
 
 **Step 3: Logout (Optional)**
-1. Send `POST /api/auth/logout` to clear the cookie
+1. Send `POST /api/auth/logout` (or `/api/auth/seller/logout` or `/api/auth/customer/logout`) to clear the cookie
 
 ### 4. Environment Variables (Optional)
 
 Create a Postman environment with:
 ```
 baseUrl: http://localhost:5000
+baseUrl: http://localhost:5000
+adminEmail: admin@example.com
+adminPassword: admin123
 sellerEmail: seller@example.com
 sellerPassword: password123
+customerEmail: customer@example.com
+customerPassword: password123
 ```
 
 Then use in requests:
@@ -1196,14 +1984,44 @@ if (!pm.cookies.get('auth_token')) {
 
 ## Test Data
 
-After running `npm run seed`, you can use these credentials:
+**Important:** Both seed scripts clear existing collections before seeding to ensure a clean state.
 
-**Seller Credentials:**
+### Seeding Reference Data
+
+Run `npm run seed:reference` to populate reference data (UserTypes, ShirtTypes, SizeReferences). This script:
+- Clears existing `UserType`, `ShirtType`, and `SizeReference` collections
+- Creates fresh reference data
+
+**Note:** Run this script first before running the main seed script.
+
+### Seeding Test Data
+
+After running `npm run seed:reference`, run `npm run seed` to populate test users and shirts. This script:
+- Clears existing `User`, `Shirt`, and `ShirtSize` collections
+- Creates test administrator and seller accounts
+- Creates sample shirts with size variants
+
+**Test Credentials:**
+
+*Administrator:*
+- Email: `admin@example.com`
+- Password: `admin123`
+
+*Seller:*
 - Email: `seller@example.com`
 - Password: `password123`
+- Note: New sellers must be created by administrators using `POST /api/admin/sellers`
+
+*Customer:*
+- Create a new customer account using `POST /api/auth/customer/signup`
+- Or use any email/password combination after signup
 
 **Sample Shirt IDs:**
 Use the shirt IDs returned from the list shirts endpoint or create new ones.
+
+**Seeding Order:**
+1. First: `npm run seed:reference` (creates reference data)
+2. Then: `npm run seed` (creates test users and shirts)
 
 ---
 
@@ -1229,13 +2047,18 @@ Use the shirt IDs returned from the list shirts endpoint or create new ones.
 ## Quick Test Checklist
 
 - [ ] Health check works
-- [ ] Login with valid credentials
+- [ ] Admin login with valid credentials
+- [ ] Admin can create seller account
+- [ ] Seller login with valid credentials
+- [ ] Customer signup works
+- [ ] Customer login works
 - [ ] Cookie is stored after login
 - [ ] List shirts (public, no auth needed)
 - [ ] Get single shirt by ID (public, no auth needed)
-- [ ] Create shirt (requires auth)
-- [ ] Update shirt (requires auth, only own shirts)
-- [ ] Delete shirt (requires auth, only own shirts)
+- [ ] Create shirt (requires seller auth)
+- [ ] Update shirt (requires seller auth, only own shirts)
+- [ ] Delete shirt (requires seller auth, only own shirts)
 - [ ] Logout clears cookie
 - [ ] Protected endpoints fail without auth
+- [ ] Admin endpoints fail without admin privileges
 

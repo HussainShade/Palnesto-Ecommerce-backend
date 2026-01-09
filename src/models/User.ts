@@ -2,22 +2,25 @@ import mongoose, { Schema, Document } from 'mongoose';
 import bcrypt from 'bcryptjs';
 
 /**
- * Seller document interface
+ * User document interface
+ * Replaces Seller model for better scalability
  */
-export interface ISeller extends Document {
+export interface IUser extends Document {
   email: string;
   password: string;
   name: string;
+  userTypeId: mongoose.Types.ObjectId; // Foreign key to UserType
+  isActive: boolean;
   createdAt: Date;
   updatedAt: Date;
   comparePassword(candidatePassword: string): Promise<boolean>;
 }
 
 /**
- * Seller schema with password hashing
- * Passwords are hashed before saving using bcrypt
+ * User schema with password hashing
+ * Uses foreign key to UserType instead of implicit role
  */
-const sellerSchema = new Schema<ISeller>(
+const userSchema = new Schema<IUser>(
   {
     email: {
       type: String,
@@ -37,6 +40,17 @@ const sellerSchema = new Schema<ISeller>(
       required: true,
       trim: true,
     },
+    userTypeId: {
+      type: Schema.Types.ObjectId,
+      ref: 'UserType',
+      required: true,
+      index: true, // Indexed for user type filtering
+    },
+    isActive: {
+      type: Boolean,
+      default: true,
+      index: true,
+    },
   },
   {
     timestamps: true,
@@ -47,7 +61,7 @@ const sellerSchema = new Schema<ISeller>(
  * Hash password before saving
  * Runs on every save/create operation
  */
-sellerSchema.pre('save', async function () {
+userSchema.pre('save', async function () {
   if (!this.isModified('password')) {
     return;
   }
@@ -60,11 +74,10 @@ sellerSchema.pre('save', async function () {
  * Compare password method for authentication
  * Used during login to verify credentials
  */
-sellerSchema.methods.comparePassword = async function (
+userSchema.methods.comparePassword = async function (
   candidatePassword: string
 ): Promise<boolean> {
   return bcrypt.compare(candidatePassword, this.password);
 };
 
-export const Seller = mongoose.model<ISeller>('Seller', sellerSchema);
-
+export const User = mongoose.model<IUser>('User', userSchema);

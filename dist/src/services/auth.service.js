@@ -1,5 +1,6 @@
 import jwt from 'jsonwebtoken';
-import { Seller } from '../models/Seller.js';
+import { User } from '../models/User.js';
+import { UserType } from '../models/UserType.js';
 /**
  * Generates JWT token for authenticated seller
  * Token expires in 7 days for production security
@@ -30,17 +31,98 @@ export const verifyToken = (token) => {
     }
 };
 /**
- * Authenticates seller with email and password
- * Returns seller document if credentials are valid
+ * Authenticates user with email and password
+ * Verifies user is a seller (has Seller UserType)
+ * Returns user document if credentials are valid
  */
 export const authenticateSeller = async (email, password) => {
-    const seller = await Seller.findOne({ email }).select('+password');
-    if (!seller) {
+    const user = await User.findOne({ email, isActive: true })
+        .select('+password')
+        .populate('userTypeId');
+    if (!user) {
         throw new Error('Invalid email or password');
     }
-    const isPasswordValid = await seller.comparePassword(password);
+    // Verify user is a seller
+    const userType = user.userTypeId;
+    if (!userType || userType.name !== 'Seller') {
+        throw new Error('Access denied. Seller account required.');
+    }
+    const isPasswordValid = await user.comparePassword(password);
     if (!isPasswordValid) {
         throw new Error('Invalid email or password');
     }
-    return seller;
+    return user;
+};
+/**
+ * Authenticates user with email and password
+ * Verifies user is a customer (has Customer UserType)
+ * Returns user document if credentials are valid
+ */
+export const authenticateCustomer = async (email, password) => {
+    const user = await User.findOne({ email, isActive: true })
+        .select('+password')
+        .populate('userTypeId');
+    if (!user) {
+        throw new Error('Invalid email or password');
+    }
+    // Verify user is a customer
+    const userType = user.userTypeId;
+    if (!userType || userType.name !== 'Customer') {
+        throw new Error('Access denied. Customer account required.');
+    }
+    const isPasswordValid = await user.comparePassword(password);
+    if (!isPasswordValid) {
+        throw new Error('Invalid email or password');
+    }
+    return user;
+};
+/**
+ * Creates a new user (signup)
+ * Automatically assigns UserType based on userType parameter
+ * Returns created user document
+ */
+/**
+ * Authenticates user with email and password
+ * Verifies user is an admin (has Admin UserType)
+ * Returns user document if credentials are valid
+ */
+export const authenticateAdmin = async (email, password) => {
+    const user = await User.findOne({ email, isActive: true })
+        .select('+password')
+        .populate('userTypeId');
+    if (!user) {
+        throw new Error('Invalid email or password');
+    }
+    // Verify user is an admin
+    const userType = user.userTypeId;
+    if (!userType || userType.name !== 'Admin') {
+        throw new Error('Access denied. Administrator account required.');
+    }
+    const isPasswordValid = await user.comparePassword(password);
+    if (!isPasswordValid) {
+        throw new Error('Invalid email or password');
+    }
+    return user;
+};
+export const createUser = async (email, password, name, userTypeName = 'Customer') => {
+    // Check if user already exists
+    const existingUser = await User.findOne({ email });
+    if (existingUser) {
+        throw new Error('User with this email already exists');
+    }
+    // Get UserType
+    const userType = await UserType.findOne({ name: userTypeName, isActive: true });
+    if (!userType) {
+        throw new Error(`UserType '${userTypeName}' not found. Please ensure reference data is seeded.`);
+    }
+    // Create user
+    const user = new User({
+        email,
+        password, // Will be hashed by pre-save hook
+        name,
+        userTypeId: userType._id,
+        isActive: true,
+    });
+    await user.save();
+    return user;
 };

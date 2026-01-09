@@ -6,14 +6,17 @@ import { createShirt, updateShirt, getShirtById, listShirts, deleteShirt, batchC
  */
 export const createShirtHandler = async (c) => {
     try {
-        const sellerId = c.get('sellerId');
+        const userId = c.get('userId'); // Changed from sellerId to userId
         const body = await c.req.json();
         const validatedData = createShirtSchema.parse(body);
-        const shirt = await createShirt(sellerId, validatedData);
+        const result = await createShirt(userId, validatedData);
         return c.json({
             success: true,
             message: 'Shirt created successfully',
-            data: { shirt },
+            data: {
+                shirt: result.shirt,
+                shirtSize: result.shirtSize,
+            },
         }, 201);
     }
     catch (error) {
@@ -36,14 +39,17 @@ export const createShirtHandler = async (c) => {
  */
 export const batchCreateShirtsHandler = async (c) => {
     try {
-        const sellerId = c.get('sellerId');
+        const userId = c.get('userId'); // Changed from sellerId to userId
         const body = await c.req.json();
         const validatedData = batchCreateShirtSchema.parse(body);
-        const shirts = await batchCreateShirts(sellerId, validatedData);
+        const result = await batchCreateShirts(userId, validatedData);
         return c.json({
             success: true,
-            message: `Successfully created ${shirts.length} shirt(s)`,
-            data: { shirts },
+            message: `Successfully created ${result.shirtSizes.length} size variant(s)`,
+            data: {
+                shirt: result.shirt,
+                shirtSizes: result.shirtSizes,
+            },
         }, 201);
     }
     catch (error) {
@@ -66,18 +72,18 @@ export const batchCreateShirtsHandler = async (c) => {
  */
 export const updateShirtHandler = async (c) => {
     try {
-        const sellerId = c.get('sellerId');
+        const userId = c.get('userId'); // Changed from sellerId to userId
         const shirtId = c.req.param('id');
         const body = await c.req.json();
         const validatedData = updateShirtSchema.parse(body);
-        const result = await updateShirt(shirtId, sellerId, validatedData);
+        const result = await updateShirt(shirtId, userId, validatedData);
         if (!result) {
             return c.json({
                 success: false,
                 message: 'Shirt not found or unauthorized',
             }, 404);
         }
-        const { shirt, updatedShirts, createdShirts, updatedCount, createdCount } = result;
+        const { shirt, updatedShirtSizes, createdShirtSizes, updatedCount, createdCount } = result;
         // Build response message
         let message = 'Shirt updated successfully';
         const messageParts = [];
@@ -95,8 +101,8 @@ export const updateShirtHandler = async (c) => {
             message,
             data: {
                 shirt,
-                updatedShirts,
-                createdShirts,
+                updatedShirtSizes,
+                createdShirtSizes,
                 updatedCount,
                 createdCount,
             },
@@ -122,8 +128,8 @@ export const updateShirtHandler = async (c) => {
 export const getShirtHandler = async (c) => {
     try {
         const shirtId = c.req.param('id');
-        const shirt = await getShirtById(shirtId);
-        if (!shirt) {
+        const result = await getShirtById(shirtId);
+        if (!result) {
             return c.json({
                 success: false,
                 message: 'Shirt not found',
@@ -131,7 +137,11 @@ export const getShirtHandler = async (c) => {
         }
         return c.json({
             success: true,
-            data: { shirt },
+            data: {
+                shirt: result.shirt,
+                shirtSizes: result.shirtSizes, // All variants including stock = 0
+                sizes: result.shirtSizes, // Alias for backward compatibility
+            },
         });
     }
     catch (error) {
@@ -163,6 +173,13 @@ export const listShirtsHandler = async (c) => {
                 errors: error.errors,
             }, 400);
         }
+        // Handle filter resolution errors (invalid size/type)
+        if (error.message?.includes('Invalid size') || error.message?.includes('Invalid shirt type')) {
+            return c.json({
+                success: false,
+                message: error.message || 'Invalid filter parameters',
+            }, 400);
+        }
         return c.json({
             success: false,
             message: error.message || 'Failed to retrieve shirts',
@@ -175,9 +192,9 @@ export const listShirtsHandler = async (c) => {
  */
 export const deleteShirtHandler = async (c) => {
     try {
-        const sellerId = c.get('sellerId');
+        const userId = c.get('userId'); // Changed from sellerId to userId
         const shirtId = c.req.param('id');
-        const deleted = await deleteShirt(shirtId, sellerId);
+        const deleted = await deleteShirt(shirtId, userId);
         if (!deleted) {
             return c.json({
                 success: false,

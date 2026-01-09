@@ -20,17 +20,20 @@ import {
  */
 export const createShirtHandler = async (c: Context) => {
   try {
-    const sellerId = c.get('sellerId') as string;
+    const userId = c.get('userId') as string; // Changed from sellerId to userId
     const body = await c.req.json();
     const validatedData = createShirtSchema.parse(body);
 
-    const shirt = await createShirt(sellerId, validatedData);
+    const result = await createShirt(userId, validatedData);
 
     return c.json(
       {
         success: true,
         message: 'Shirt created successfully',
-        data: { shirt },
+        data: { 
+          shirt: result.shirt,
+          shirtSize: result.shirtSize,
+        },
       },
       201
     );
@@ -62,17 +65,20 @@ export const createShirtHandler = async (c: Context) => {
  */
 export const batchCreateShirtsHandler = async (c: Context) => {
   try {
-    const sellerId = c.get('sellerId') as string;
+    const userId = c.get('userId') as string; // Changed from sellerId to userId
     const body = await c.req.json();
     const validatedData = batchCreateShirtSchema.parse(body);
 
-    const shirts = await batchCreateShirts(sellerId, validatedData);
+    const result = await batchCreateShirts(userId, validatedData);
 
     return c.json(
       {
         success: true,
-        message: `Successfully created ${shirts.length} shirt(s)`,
-        data: { shirts },
+        message: `Successfully created ${result.shirtSizes.length} size variant(s)`,
+        data: { 
+          shirt: result.shirt,
+          shirtSizes: result.shirtSizes,
+        },
       },
       201
     );
@@ -104,12 +110,12 @@ export const batchCreateShirtsHandler = async (c: Context) => {
  */
 export const updateShirtHandler = async (c: Context) => {
   try {
-    const sellerId = c.get('sellerId') as string;
+    const userId = c.get('userId') as string; // Changed from sellerId to userId
     const shirtId = c.req.param('id');
     const body = await c.req.json();
     const validatedData = updateShirtSchema.parse(body);
 
-    const result = await updateShirt(shirtId, sellerId, validatedData);
+    const result = await updateShirt(shirtId, userId, validatedData);
 
     if (!result) {
       return c.json(
@@ -121,7 +127,7 @@ export const updateShirtHandler = async (c: Context) => {
       );
     }
 
-    const { shirt, updatedShirts, createdShirts, updatedCount, createdCount } = result;
+    const { shirt, updatedShirtSizes, createdShirtSizes, updatedCount, createdCount } = result;
 
     // Build response message
     let message = 'Shirt updated successfully';
@@ -141,8 +147,8 @@ export const updateShirtHandler = async (c: Context) => {
       message,
       data: {
         shirt,
-        updatedShirts,
-        createdShirts,
+        updatedShirtSizes,
+        createdShirtSizes,
         updatedCount,
         createdCount,
       },
@@ -175,9 +181,9 @@ export const updateShirtHandler = async (c: Context) => {
 export const getShirtHandler = async (c: Context) => {
   try {
     const shirtId = c.req.param('id');
-    const shirt = await getShirtById(shirtId);
+    const result = await getShirtById(shirtId);
 
-    if (!shirt) {
+    if (!result) {
       return c.json(
         {
           success: false,
@@ -189,7 +195,11 @@ export const getShirtHandler = async (c: Context) => {
 
     return c.json({
       success: true,
-      data: { shirt },
+      data: { 
+        shirt: result.shirt,
+        shirtSizes: result.shirtSizes, // All variants including stock = 0
+        sizes: result.shirtSizes, // Alias for backward compatibility
+      },
     });
   } catch (error: any) {
     return c.json(
@@ -229,6 +239,17 @@ export const listShirtsHandler = async (c: Context) => {
       );
     }
 
+    // Handle filter resolution errors (invalid size/type)
+    if (error.message?.includes('Invalid size') || error.message?.includes('Invalid shirt type')) {
+      return c.json(
+        {
+          success: false,
+          message: error.message || 'Invalid filter parameters',
+        },
+        400
+      );
+    }
+
     return c.json(
       {
         success: false,
@@ -245,10 +266,10 @@ export const listShirtsHandler = async (c: Context) => {
  */
 export const deleteShirtHandler = async (c: Context) => {
   try {
-    const sellerId = c.get('sellerId') as string;
+    const userId = c.get('userId') as string; // Changed from sellerId to userId
     const shirtId = c.req.param('id');
 
-    const deleted = await deleteShirt(shirtId, sellerId);
+    const deleted = await deleteShirt(shirtId, userId);
 
     if (!deleted) {
       return c.json(

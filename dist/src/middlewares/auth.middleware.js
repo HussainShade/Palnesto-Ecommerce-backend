@@ -3,7 +3,8 @@ import { verifyToken } from '../services/auth.service.js';
 /**
  * Authentication middleware
  * Verifies JWT token from HTTP-only cookie
- * Attaches sellerId to context for use in controllers
+ * Attaches userId to context for use in controllers
+ * Also sets sellerId for backward compatibility
  */
 export const authMiddleware = async (c, next) => {
     try {
@@ -15,8 +16,12 @@ export const authMiddleware = async (c, next) => {
             }, 401);
         }
         const payload = verifyToken(token);
-        c.set('sellerId', payload.sellerId);
-        c.set('sellerEmail', payload.email);
+        // Set userId (new structure)
+        c.set('userId', payload.userId || payload.sellerId); // Support both for migration
+        // Keep sellerId for backward compatibility during migration
+        c.set('sellerId', payload.userId || payload.sellerId);
+        c.set('userEmail', payload.email);
+        c.set('sellerEmail', payload.email); // Backward compatibility
         await next();
     }
     catch (error) {
