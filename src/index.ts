@@ -18,10 +18,48 @@ const app = new Hono();
 
 // CORS Configuration
 // Allows requests from Next.js frontend with credentials support for HTTP-only cookies
-const frontendUrl = process.env.FRONTEND_URL || process.env.CORS_ORIGIN || 'http://localhost:3000';
+const getFrontendUrl = (): string => {
+  const url = process.env.FRONTEND_URL || process.env.CORS_ORIGIN || 'http://localhost:3000';
+  // Remove trailing slash if present
+  return url.replace(/\/$/, '');
+};
+
+const frontendUrl = getFrontendUrl();
+
+// Allowed origins (support multiple for preview deployments)
+const allowedOrigins = [
+  frontendUrl,
+  'http://localhost:3000',
+  'http://localhost:3001',
+].filter(Boolean);
+
+// CORS origin validator function
+const corsOrigin = (origin: string | undefined): string | undefined => {
+  // Allow requests with no origin (like mobile apps or curl requests)
+  if (!origin) {
+    return allowedOrigins[0];
+  }
+
+  // Remove trailing slash from origin for comparison
+  const normalizedOrigin = origin.replace(/\/$/, '');
+
+  // Check if origin is in allowed list
+  const isAllowed = allowedOrigins.some((allowed) => {
+    const normalizedAllowed = allowed.replace(/\/$/, '');
+    return normalizedOrigin === normalizedAllowed;
+  });
+
+  if (isAllowed) {
+    return normalizedOrigin;
+  }
+
+  // Log for debugging (remove in production if needed)
+  console.warn(`⚠️  CORS: Origin "${origin}" not in allowed list:`, allowedOrigins);
+  return undefined;
+};
 
 app.use('*', cors({
-  origin: frontendUrl, // Allow requests from Next.js frontend
+  origin: corsOrigin, // Use function to validate origin
   credentials: true, // CRITICAL: Required for HTTP-only cookies (Access-Control-Allow-Credentials: true)
   allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'], // Allowed HTTP methods
   allowHeaders: ['Content-Type', 'Authorization'], // Allowed request headers
@@ -85,12 +123,13 @@ const startServer = async () => {
 
     serve(
       {
-        fetch: app.fetch,
+  fetch: app.fetch,
         port,
       },
       (info) => {
         console.log(`🚀 Server is running on http://localhost:${info.port}`);
         console.log(`📝 Environment: ${process.env.NODE_ENV || 'development'}`);
+        console.log(`🌐 CORS: Allowing origins:`, allowedOrigins);
       }
     );
   } catch (error) {
