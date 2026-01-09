@@ -18,20 +18,28 @@ const app = new Hono();
 
 // CORS Configuration
 // Allows requests from Next.js frontend with credentials support for HTTP-only cookies
-const getFrontendUrl = (): string => {
-  const url = process.env.FRONTEND_URL || process.env.CORS_ORIGIN || 'http://localhost:3000';
-  // Remove trailing slash if present
-  return url.replace(/\/$/, '');
+// Supports comma-separated origins in environment variable for multiple environments
+
+const getAllowedOrigins = (): string[] => {
+  const envOrigins = process.env.FRONTEND_URL || process.env.CORS_ORIGIN || 'http://localhost:3000';
+  
+  // Split by comma if multiple origins are provided
+  const origins = envOrigins.split(',').map(origin => origin.trim());
+  
+  // Remove trailing slashes and filter out empty strings
+  const normalizedOrigins = origins
+    .map(origin => origin.replace(/\/$/, ''))
+    .filter(origin => origin.length > 0);
+  
+  // Always include localhost for local development
+  const defaultOrigins = ['http://localhost:3000', 'http://localhost:3001'];
+  
+  // Combine and remove duplicates
+  const allOrigins = [...normalizedOrigins, ...defaultOrigins];
+  return [...new Set(allOrigins)];
 };
 
-const frontendUrl = getFrontendUrl();
-
-// Allowed origins (support multiple for preview deployments)
-const allowedOrigins = [
-  frontendUrl,
-  'http://localhost:3000',
-  'http://localhost:3001',
-].filter(Boolean);
+const allowedOrigins = getAllowedOrigins();
 
 // CORS origin validator function
 const corsOrigin = (origin: string | undefined): string | undefined => {
